@@ -26,6 +26,7 @@ const App: React.FC = () => {
   const isDragging = useRef(false);
   const undoStack = useRef<Pose[]>([]);
   const redoStack = useRef<Pose[]>([]);
+  const dragStartPose = useRef<Pose | null>(null);
 
 
   const [activeTab, setActiveTab] = useState<'model' | 'animation'>('model');
@@ -205,8 +206,7 @@ const App: React.FC = () => {
   const svgRef = useRef<SVGSVGElement>(null); 
   const [isCraneActive] = useState(false);
   const [isCraneDragging, setIsCraneDragging] = useState(false);
-  const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: number; startRootY: number } | null>(dragStartInfoInitial());
-  const dragStartPose = useRef<Pose | null>(null);
+const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: number; startRootY: number } | null>(null);
 
   function dragStartInfoInitial() {
     return { startX: 0, startY: 0, startRootX: 0, startRootY: 0 };
@@ -397,6 +397,11 @@ const App: React.FC = () => {
               isAirMode,
           )) {
               return prev;
+          }
+
+          // Save to undo stack when making actual changes
+          if (isDragging.current && !dragStartPose.current) {
+              dragStartPose.current = prev;
           }
 
           return tentativeNextPose;

@@ -96,20 +96,20 @@ export const JOINT_LIMITS: JointLimits = {
 
   // Right Arm (relative to parent)
   [PartName.RShoulder]: { min: -180, max: 180 }, 
-  rForearm: { min: -180, max: 180 },         
+  [PartName.RForearm]: { min: -160, max: 160 },         // Allow almost full elbow bend both ways
   [PartName.RWrist]: { min: -180, max: 180 }, 
 
-  // Left Arm (relative to parent)
-  [PartName.LShoulder]: { min: -180, max: 180 }, 
-  lForearm: { min: -180, max: 180 },          
+  // Left Arm (relative to parent) - very permissive for intuitive posing
+  [PartName.LShoulder]: { min: -180, max: 180 }, // Full rotation for natural movement
+  [PartName.LForearm]: { min: -160, max: 160 },          // Allow almost full elbow bend both ways
   [PartName.LWrist]: { min: -180, max: 180 }, 
 
   // Right Leg (relative to parent)
   [PartName.RThigh]: { min: -180, max: 180 }, 
-  rCalf: { min: -180, max: 180 },           
+  [PartName.RCalf]: { min: -180, max: 180 },           
   [PartName.RAnkle]: { min: -180, max: 180 }, 
   // Left Leg (relative to parent)
   [PartName.LThigh]: { min: -180, max: 180 },
-  lCalf: { min: -180, max: 180 },
+  [PartName.LCalf]: { min: -180, max: 180 },
   [PartName.LAnkle]: { min: -180, max: 180 },
 };

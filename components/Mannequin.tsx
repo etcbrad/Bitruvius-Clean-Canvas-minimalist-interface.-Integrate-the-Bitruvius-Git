@@ -62,6 +62,60 @@ export const getPartCategoryDisplayName = (part: PartName): string => { // Expor
   }
 };
 
+// Lifted outside component to prevent remounting on every render
+interface PartWrapperProps {
+  part: PartName;
+  children?: React.ReactNode;
+  onMouseDownOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void;
+  onDoubleClickOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void;
+  selectedParts: PartSelection;
+  jointModes: Record<PartName, JointConstraint>;
+  renderMode: RenderMode;
+}
+
+const PartWrapper: React.FC<PartWrapperProps> = ({ 
+  part, 
+  children, 
+  onMouseDownOnPart,
+  onDoubleClickOnPart,
+  selectedParts,
+  jointModes,
+  renderMode
+}) => {
+  const isSelected = selectedParts[part];
+
+  const handleMouseDown = (e: React.MouseEvent<SVGGElement>) => { 
+    e.stopPropagation(); 
+    onMouseDownOnPart?.(part, e); 
+  };
+  
+  const handleDoubleClick = (e: React.MouseEvent<SVGGElement>) => {
+    e.stopPropagation();
+    onDoubleClickOnPart?.(part, e);
+  };
+
+  return (
+    <g 
+      className="cursor-pointer" 
+      onMouseDown={handleMouseDown}
+      onDoubleClick={handleDoubleClick}
+      role="button"
+      aria-label={`Select ${getPartCategoryDisplayName(part)}`}
+      aria-pressed={isSelected}
+    >
+      {React.Children.map(children, child =>
+        React.isValidElement(child) && child.type === Bone
+          ? React.cloneElement(child as React.ReactElement<BoneProps>, { 
+              isSelected: isSelected,
+              renderMode: renderMode,
+              jointConstraintMode: jointModes[part],
+            })
+          : child
+      )}
+    </g>
+  );
+};
+
 export const Mannequin: React.FC<MannequinProps> = ({
   pose,
   ghostPose,
@@ -80,45 +134,6 @@ export const Mannequin: React.FC<MannequinProps> = ({
   const joints = getJointPositions(pose, activePins);
   const ghostJoints = ghostPose ? getJointPositions(ghostPose, activePins) : null;
   const offsets = pose.offsets || {};
-
-  const PartWrapper = ({ part, isGhost = false, children }: { part: PartName; isGhost?: boolean; children?: React.ReactNode }) => {
-    const isSelected = selectedParts[part];
-
-    const handleMouseDown = (e: React.MouseEvent<SVGGElement>) => { 
-      if (isGhost) return;
-      e.stopPropagation(); 
-      onMouseDownOnPart?.(part, e); 
-    };
-    
-    const handleDoubleClick = (e: React.MouseEvent<SVGGElement>) => {
-      if (isGhost) return;
-      e.stopPropagation();
-      onDoubleClickOnPart?.(part, e);
-    };
-
-    return (
-      <g 
-        className={isGhost ? "pointer-events-none opacity-20" : "cursor-pointer"} 
-        onMouseDown={handleMouseDown}
-        onDoubleClick={handleDoubleClick} // Reintroduced
-        role={isGhost ? "presentation" : "button"} 
-        aria-label={isGhost ? undefined : `Select ${getPartCategoryDisplayName(part)}`}
-        aria-pressed={isGhost ? undefined : isSelected}
-      >
-        {React.Children.map(children, child =>
-          // Explicitly cloneElement and pass `isSelected`, `renderMode`, and `jointConstraintMode`.
-          React.isValidElement(child) && child.type === Bone
-            ? React.cloneElement(child as React.ReactElement<BoneProps>, { 
-                isSelected: isGhost ? false : isSelected,
-                renderMode: isGhost ? 'wireframe' : renderMode,
-                jointConstraintMode: jointModes[part], // Pass kinetic mode
-              })
-            : child
-        )}
-      </g>
-    );
-  };
-
   const ROOT_COLOR = "#5A5A5A"; // Darker grayscale for the root circle
   const PIN_INDICATOR_SIZE = ANATOMY.ROOT_SIZE * 0.7; // Size of the inner circle of the root graphic
   const PIN_INDICATOR_STROKE_COLOR = COLORS.SELECTION; // Light monochrome for stroke
@@ -435,6 +450,7 @@ export const Mannequin: React.FC<MannequinProps> = ({
             </g>
           );
         })}
+      </g>
       </g>
     </g>
   );
