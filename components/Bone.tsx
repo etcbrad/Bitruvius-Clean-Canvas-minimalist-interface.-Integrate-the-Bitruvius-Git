@@ -67,6 +67,59 @@ const getPartCategoryColor = (category?: string) => {
 };
 
 
+// Pure function moved outside component to prevent re-allocation on every render
+const getBonePath = (length: number, width: number, variant: string, drawsUpwards: boolean): string => {
+  const effectiveLength = drawsUpwards ? -length : length;
+  const halfWidth = width / 2;
+
+  switch (variant) {
+    case 'head-tall-oval':
+      const hH = ANATOMY.HEAD * 0.75;    
+      const bW = ANATOMY.HEAD_WIDTH * 0.3; 
+      const tW = ANATOMY.HEAD_WIDTH * 0.6; 
+      return `M ${-bW / 2},0 L ${bW / 2},0 C ${bW / 2 + 10},0 ${tW / 2},${-hH * 0.4} ${tW / 2},${-hH} L ${-tW / 2},${-hH} C ${-tW / 2},${-hH * 0.4} ${-bW / 2 - 10},0 ${-bW / 2},0 Z`;
+
+    case 'collar-horizontal-oval-shape':
+      const collarVisHeight = ANATOMY.COLLAR;
+      const collarBaseWidth = ANATOMY.COLLAR_WIDTH;
+      const collarTopWidth = collarBaseWidth * 0.5; 
+      return `M ${collarBaseWidth / 2},0 C ${collarBaseWidth * 0.3},${-collarVisHeight * 0.3} ${collarTopWidth * 0.7},${-collarVisHeight * 0.6} ${collarTopWidth / 2},${-collarVisHeight} L ${-collarTopWidth / 2},${-collarVisHeight} C ${-collarTopWidth * 0.7},${-collarVisHeight * 0.6} ${-collarBaseWidth * 0.3},${-collarVisHeight * 0.3} ${-collarBaseWidth / 2},0 Z`;
+
+    case 'waist-teardrop-pointy-up':
+      const wHeight = ANATOMY.WAIST;
+      const wWidth = ANATOMY.WAIST_WIDTH;
+      return `M ${wWidth / 2},0 L ${wWidth * 0.15},${-wHeight} L ${-wWidth * 0.15},${-wHeight} L ${-wWidth / 2},0 Z`;
+
+    case 'torso-teardrop-pointy-down':
+      const tHeight = ANATOMY.TORSO;
+      const tWidth = ANATOMY.TORSO_WIDTH;
+      return `M ${tWidth * 0.3},0 C ${tWidth * 0.3},${-tHeight * 0.3} ${tWidth / 2},${-tHeight * 0.7} ${tWidth / 2},${-tHeight} L ${-tWidth / 2},${-tHeight} C ${-tWidth / 2},${-tHeight * 0.7} ${-tWidth * 0.3},${-tHeight * 0.3} ${-tWidth * 0.3},0 Z`;
+
+    case 'deltoid-shape':
+      const dHeight = ANATOMY.UPPER_ARM;
+      const shoulderWidth = ANATOMY.LIMB_WIDTH_ARM; 
+      return `M ${shoulderWidth / 2} 0
+              C ${shoulderWidth / 2} ${dHeight * 0.2} ${shoulderWidth * 1.2 / 2} ${dHeight * 0.4} ${shoulderWidth * 1.2 / 2} ${dHeight * 0.7}
+              L 0 ${dHeight}
+              L ${-shoulderWidth * 1.2 / 2} ${dHeight * 0.7}
+              C ${-shoulderWidth * 1.2 / 2} ${dHeight * 0.4} ${-shoulderWidth / 2} ${dHeight * 0.2} ${-shoulderWidth / 2} 0 Z`;
+
+    case 'limb-tapered':
+      const endWidth = width * 0.65;
+      return `M ${width / 2},0 L ${endWidth / 2},${effectiveLength} L ${-endWidth / 2},${effectiveLength} L ${-width / 2},0 Z`;
+
+    case 'hand-foot-arrowhead-shape':
+      const hBaseWidth = width * 0.4; 
+      const hMaxWidth = width;
+      const flareY = effectiveLength * 0.2; 
+      return `M ${-hBaseWidth / 2},0 L ${hBaseWidth / 2},0 L ${hMaxWidth / 2},${flareY} L 0,${effectiveLength} L ${-hMaxWidth / 2},${flareY} Z`;
+
+    default:
+      const split = effectiveLength * 0.4;
+      return `M 0 0 L ${halfWidth} ${split} L 0 ${effectiveLength} L ${-halfWidth} ${split} Z`;
+  }
+};
+
 export const Bone: React.FC<BoneProps> = ({
   rotation,
   length,
@@ -84,58 +137,6 @@ export const Bone: React.FC<BoneProps> = ({
   partCategory, 
   jointConstraintMode = 'fk', // Default to 'fk'
 }) => {
-  const getBonePath = (length: number, width: number, variant: string, drawsUpwards: boolean): string => {
-    const effectiveLength = drawsUpwards ? -length : length;
-    const halfWidth = width / 2;
-
-    switch (variant) {
-      case 'head-tall-oval':
-        const hH = ANATOMY.HEAD * 0.75;    
-        const bW = ANATOMY.HEAD_WIDTH * 0.3; 
-        const tW = ANATOMY.HEAD_WIDTH * 0.6; 
-        return `M ${-bW / 2},0 L ${bW / 2},0 C ${bW / 2 + 10},0 ${tW / 2},${-hH * 0.4} ${tW / 2},${-hH} L ${-tW / 2},${-hH} C ${-tW / 2},${-hH * 0.4} ${-bW / 2 - 10},0 ${-bW / 2},0 Z`;
-
-      case 'collar-horizontal-oval-shape':
-        const collarVisHeight = ANATOMY.COLLAR;
-        const collarBaseWidth = ANATOMY.COLLAR_WIDTH;
-        const collarTopWidth = collarBaseWidth * 0.5; 
-        return `M ${collarBaseWidth / 2},0 C ${collarBaseWidth * 0.3},${-collarVisHeight * 0.3} ${collarTopWidth * 0.7},${-collarVisHeight * 0.6} ${collarTopWidth / 2},${-collarVisHeight} L ${-collarTopWidth / 2},${-collarVisHeight} C ${-collarTopWidth * 0.7},${-collarVisHeight * 0.6} ${-collarBaseWidth * 0.3},${-collarVisHeight * 0.3} ${-collarBaseWidth / 2},0 Z`;
-
-      case 'waist-teardrop-pointy-up':
-        const wHeight = ANATOMY.WAIST;
-        const wWidth = ANATOMY.WAIST_WIDTH;
-        return `M ${wWidth / 2},0 L ${wWidth * 0.15},${-wHeight} L ${-wWidth * 0.15},${-wHeight} L ${-wWidth / 2},0 Z`;
-
-      case 'torso-teardrop-pointy-down':
-        const tHeight = ANATOMY.TORSO;
-        const tWidth = ANATOMY.TORSO_WIDTH;
-        return `M ${tWidth * 0.3},0 C ${tWidth * 0.3},${-tHeight * 0.3} ${tWidth / 2},${-tHeight * 0.7} ${tWidth / 2},${-tHeight} L ${-tWidth / 2},${-tHeight} C ${-tWidth / 2},${-tHeight * 0.7} ${-tWidth * 0.3},${-tHeight * 0.3} ${-tWidth * 0.3},0 Z`;
-
-      case 'deltoid-shape':
-        const dHeight = ANATOMY.UPPER_ARM;
-        const shoulderWidth = ANATOMY.LIMB_WIDTH_ARM; 
-        return `M ${shoulderWidth / 2} 0
-                C ${shoulderWidth / 2} ${dHeight * 0.2} ${shoulderWidth * 1.2 / 2} ${dHeight * 0.4} ${shoulderWidth * 1.2 / 2} ${dHeight * 0.7}
-                L 0 ${dHeight}
-                L ${-shoulderWidth * 1.2 / 2} ${dHeight * 0.7}
-                C ${-shoulderWidth * 1.2 / 2} ${dHeight * 0.4} ${-shoulderWidth / 2} ${dHeight * 0.2} ${-shoulderWidth / 2} 0 Z`;
-
-      case 'limb-tapered':
-        const endWidth = width * 0.65;
-        return `M ${width / 2},0 L ${endWidth / 2},${effectiveLength} L ${-endWidth / 2},${effectiveLength} L ${-width / 2},0 Z`;
-
-      case 'hand-foot-arrowhead-shape':
-        const hBaseWidth = width * 0.4; 
-        const hMaxWidth = width;
-        const flareY = effectiveLength * 0.2; 
-        return `M ${-hBaseWidth / 2},0 L ${hBaseWidth / 2},0 L ${hMaxWidth / 2},${flareY} L 0,${effectiveLength} L ${-hMaxWidth / 2},${flareY} Z`;
-
-      default:
-        const split = effectiveLength * 0.4;
-        return `M 0 0 L ${halfWidth} ${split} L 0 ${effectiveLength} L ${-halfWidth} ${split} Z`;
-    }
-  };
-
   const partCategoryColor = getPartCategoryColor(partCategory);
 
   const pathFill = useMemo(() => {
@@ -191,8 +192,9 @@ export const Bone: React.FC<BoneProps> = ({
 
 
   const visualEndPoint = drawsUpwards ? -length : length;
+  // Fixed transform order: rotate first, then translate offset in bone-local space
   const transform = (offset.x !== 0 || offset.y !== 0)
-    ? `translate(${offset.x}, ${offset.y}) rotate(${rotation})`
+    ? `rotate(${rotation}) translate(${offset.x}, ${offset.y})`
     : `rotate(${rotation})`;
 
   return (

@@ -25,8 +25,7 @@ const App: React.FC = () => {
   const [ghostPose, setGhostPose] = useState<Pose>(RESET_POSE);
   const isDragging = useRef(false);
   const undoStack = useRef<Pose[]>([]);
-  const redoStack = useRef<Pose[]>([]); 
-  redoStack.current = []; // Clear redo stack on mount
+  const redoStack = useRef<Pose[]>([]);
 
 
   const [activeTab, setActiveTab] = useState<'model' | 'animation'>('model');
@@ -74,7 +73,7 @@ const App: React.FC = () => {
   const [kinematicMode, setKinematicMode] = useState<KinematicMode>('fk');
   const [isPoweredOn, setIsPoweredOn] = useState(true);
 
-  const animationTimer = useRef<NodeJS.Timeout | null>(null);
+  const animationTimer = useRef<number | null>(null);
 
   // --- Animation Logic ---
   const addKeyframe = useCallback(() => {
@@ -103,7 +102,7 @@ const App: React.FC = () => {
 
   const stopAnimation = useCallback(() => {
     setAnimation(prev => ({ ...prev, isPlaying: false }));
-    if (animationTimer.current) clearInterval(animationTimer.current);
+    if (animationTimer.current) cancelAnimationFrame(animationTimer.current);
   }, []);
 
   useEffect(() => {
@@ -131,7 +130,7 @@ const App: React.FC = () => {
         setActivePose(interpolated);
 
         if (t < 1) {
-          animationTimer.current = setTimeout(animate, 16);
+          animationTimer.current = requestAnimationFrame(animate);
         } else {
           setAnimation(prev => ({ ...prev, currentFrameIndex: nextIndex }));
         }
@@ -140,7 +139,7 @@ const App: React.FC = () => {
       animate();
     }
     return () => {
-      if (animationTimer.current) clearTimeout(animationTimer.current);
+      if (animationTimer.current) cancelAnimationFrame(animationTimer.current);
     };
   }, [animation.isPlaying, animation.currentFrameIndex, animation.keyframes, animation.loop, stopAnimation]);
 

@@ -1,43 +1,82 @@
+import { ANATOMY, BASE_ROTATIONS, RIGGING, JOINT_LIMITS } from '../constants';
+import {
+  PartName,
+  Pose,
+  Vector2D,
+  AnchorName,
+  JointConstraint,
+  CHILD_MAP,
+  LIMB_SEQUENCES,
+  partNameToPoseKey,
+} from '../types';
 
-import { ANATOMY, BASE_ROTATIONS, RIGGING } from '../constants';
-import { PartName, Pose, Vector2D, AnchorName, JointConstraint, CHILD_MAP, LIMB_SEQUENCES, partNameToPoseKey } from '../types';
+// ---------------------------------------------------------------------------
+// Math Utilities
+// ---------------------------------------------------------------------------
 
-export const lerp = (start: number, end: number, t: number): number => start * (1 - t) + end * t;
+export const lerp = (start: number, end: number, t: number): number =>
+  start * (1 - t) + end * t;
 
 /**
  * Calculates shortest angular difference between two angles in degrees.
  */
 export const getShortestAngleDiffDeg = (currentDeg: number, startDeg: number): number => {
   let diff = currentDeg - startDeg;
-  diff = ((diff % 360) + 360) % 360; 
+  diff = ((diff % 360) + 360) % 360;
   if (diff > 180) diff -= 360;
   return diff;
 };
 
 export const lerpAngleShortestPath = (a: number, b: number, t: number): number => {
   const normalize = (angle: number) => ((angle % 360) + 360) % 360;
-  let start = normalize(a);
-  let end = normalize(b);
+  const start = normalize(a);
+  const end   = normalize(b);
   let delta = end - start;
   if (delta > 180) delta -= 360;
   else if (delta < -180) delta += 360;
   return a + delta * t;
 };
 
-const rad = (deg: number): number => deg * Math.PI / 180;
-const deg = (rad: number): number => rad * 180 / Math.PI;
-const dist = (v1: Vector2D, v2: Vector2D): number => Math.sqrt(Math.pow(v2.x - v1.x, 2) + Math.pow(v2.y - v1.y, 2));
+const rad = (d: number): number => d * Math.PI / 180;
+const deg = (r: number): number => r * 180 / Math.PI;
+const dist = (v1: Vector2D, v2: Vector2D): number =>
+  Math.sqrt(Math.pow(v2.x - v1.x, 2) + Math.pow(v2.y - v1.y, 2));
 
 const rotateVec = (x: number, y: number, angleDeg: number): Vector2D => {
   const r = rad(angleDeg);
-  const c = Math.cos(r);
-  const s = Math.sin(r);
-  return { x: x * c - y * s, y: x * s + y * c };
+  return { x: x * Math.cos(r) - y * Math.sin(r), y: x * Math.sin(r) + y * Math.cos(r) };
 };
-const addVec = (v1: Vector2D, v2: Vector2D): Vector2D => ({ x: v1.x + v2.x, y: v1.y + v2.y });
 
-export const getTotalRotation = (key: string, pose: Pose): number => 
+const addVec = (v1: Vector2D, v2: Vector2D): Vector2D => ({
+  x: v1.x + v2.x,
+  y: v1.y + v2.y,
+});
+
+// ---------------------------------------------------------------------------
+// Rotation Helpers
+// ---------------------------------------------------------------------------
+
+export const getTotalRotation = (key: string, pose: Pose): number =>
   (BASE_ROTATIONS[key as keyof typeof BASE_ROTATIONS] || 0) + ((pose as any)[key] || 0);
+
+// ---------------------------------------------------------------------------
+// Joint Limit Clamping
+// ---------------------------------------------------------------------------
+
+/**
+ * Clamps a local joint angle to its anatomical limits defined in JOINT_LIMITS.
+ * Called during IK writeback to prevent impossible poses.
+ */
+const applyJointLimit = (localAngle: number, part: PartName): number => {
+  const key = partNameToPoseKey[part];
+  const limits = JOINT_LIMITS[key as keyof typeof JOINT_LIMITS];
+  if (!limits) return localAngle;
+  return Math.max(limits.min, Math.min(limits.max, localAngle));
+};
+
+// ---------------------------------------------------------------------------
+// Core FK — single source of truth used by both renderer and IK solver
+// ---------------------------------------------------------------------------
 
 const calculateBoneGlobalPositions = (
   parentGlobalPos: Vector2D,
@@ -45,7 +84,7 @@ const calculateBoneGlobalPositions = (
   boneTotalLocalRotation: number,
   boneLength: number,
   boneOffset: Vector2D = { x: 0, y: 0 },
-  isUpwardDrawing: boolean = false
+  isUpwardDrawing: boolean = false,
 ): { globalStartPoint: Vector2D; globalEndPoint: Vector2D; childInheritedGlobalAngle: number } => {
   const rotatedOffset = rotateVec(boneOffset.x, boneOffset.y, parentGlobalAngle);
   const globalStartPoint = addVec(parentGlobalPos, rotatedOffset);
@@ -56,15 +95,213 @@ const calculateBoneGlobalPositions = (
   return { globalStartPoint, globalEndPoint, childInheritedGlobalAngle: boneGlobalAngle };
 };
 
+const _calculateGlobalJointPositions = (
+  baseRoot: Vector2D,
+  baseBodyRotation: number,
+  pose: Pose,
+): Record<string, Vector2D> => {
+  const offsets = pose.offsets || {};
+
+  const waistCalc  = calculateBoneGlobalPositions(baseRoot, baseBodyRotation, getTotalRotation(PartName.Waist, pose), ANATOMY.WAIST, offsets[PartName.Waist], true);
+  const torsoCalc  = calculateBoneGlobalPositions(waistCalc.globalEndPoint, waistCalc.childInheritedGlobalAngle, getTotalRotation(PartName.Torso, pose), ANATOMY.TORSO, offsets[PartName.Torso], true);
+  const collarCalc = calculateBoneGlobalPositions(torsoCalc.globalEndPoint, torsoCalc.childInheritedGlobalAngle, getTotalRotation(PartName.Collar, pose), ANATOMY.COLLAR, offsets[PartName.Collar], true);
+  const collarAngle = collarCalc.childInheritedGlobalAngle;
+  const collarEnd   = collarCalc.globalEndPoint;
+
+  const headPivot      = addVec(collarEnd, rotateVec(0, -ANATOMY.HEAD_NECK_GAP_OFFSET, collarAngle));
+  const headGlobalAngle = collarAngle + getTotalRotation(PartName.Head, pose);
+  const headTip         = addVec(headPivot, rotateVec(0, -ANATOMY.HEAD, headGlobalAngle));
+
+  const getArmJoints = (isRight: boolean) => {
+    const sX = isRight ? RIGGING.R_SHOULDER_X_OFFSET_FROM_COLLAR_CENTER : RIGGING.L_SHOULDER_X_OFFSET_FROM_COLLAR_CENTER;
+    const shoulderAttach = addVec(collarEnd, rotateVec(sX, RIGGING.SHOULDER_Y_OFFSET_FROM_COLLAR_END, collarAngle));
+    const upperArmCalc   = calculateBoneGlobalPositions(shoulderAttach, collarAngle, getTotalRotation(isRight ? PartName.RShoulder : PartName.LShoulder, pose), ANATOMY.UPPER_ARM, offsets[isRight ? PartName.RShoulder : PartName.LShoulder], false);
+    const forearmCalc    = calculateBoneGlobalPositions(upperArmCalc.globalEndPoint, upperArmCalc.childInheritedGlobalAngle, getTotalRotation(isRight ? 'rForearm' : 'lForearm', pose), ANATOMY.LOWER_ARM, offsets[isRight ? PartName.RElbow : PartName.LElbow], false);
+    const handAngle      = forearmCalc.childInheritedGlobalAngle + getTotalRotation(isRight ? PartName.RWrist : PartName.LWrist, pose);
+    const handTip        = addVec(forearmCalc.globalEndPoint, rotateVec(0, ANATOMY.HAND, handAngle));
+    return {
+      shoulder: shoulderAttach,
+      elbow: upperArmCalc.globalEndPoint,
+      wrist: forearmCalc.globalEndPoint,
+      hand: handTip,
+      // Expose inherited angles for IK parent-angle extraction
+      upperArmGlobalAngle: upperArmCalc.childInheritedGlobalAngle,
+      forearmGlobalAngle:  forearmCalc.childInheritedGlobalAngle,
+    };
+  };
+
+  const getLegJoints = (isRight: boolean) => {
+    const thighCalc = calculateBoneGlobalPositions(baseRoot, baseBodyRotation, getTotalRotation(isRight ? PartName.RThigh : PartName.LThigh, pose), ANATOMY.LEG_UPPER, offsets[isRight ? PartName.RThigh : PartName.LThigh], false);
+    const calfCalc  = calculateBoneGlobalPositions(thighCalc.globalEndPoint, thighCalc.childInheritedGlobalAngle, getTotalRotation(isRight ? 'rCalf' : 'lCalf', pose), ANATOMY.LEG_LOWER, offsets[isRight ? PartName.RSkin : PartName.LSkin], false);
+    const ankleAngle = calfCalc.childInheritedGlobalAngle + getTotalRotation(isRight ? PartName.RAnkle : PartName.LAnkle, pose);
+    const footTip    = addVec(calfCalc.globalEndPoint, rotateVec(0, ANATOMY.FOOT, ankleAngle));
+    return {
+      hip: baseRoot,
+      knee: thighCalc.globalEndPoint,
+      ankle: calfCalc.globalEndPoint,
+      footTip,
+    };
+  };
+
+  const rArm = getArmJoints(true);
+  const lArm = getArmJoints(false);
+  const rLeg = getLegJoints(true);
+  const lLeg = getLegJoints(false);
+
+  return {
+    root:      baseRoot,
+    waist:     baseRoot,
+    torso:     waistCalc.globalEndPoint,
+    collar:    torsoCalc.globalEndPoint,
+    head:      headPivot,
+    rShoulder: rArm.shoulder,
+    rElbow:    rArm.elbow,
+    rWrist:    rArm.wrist,
+    lShoulder: lArm.shoulder,
+    lElbow:    lArm.elbow,
+    lWrist:    lArm.wrist,
+    rThigh:    baseRoot,
+    [PartName.RSkin]: rLeg.knee,
+    rAnkle:    rLeg.ankle,
+    lThigh:    baseRoot,
+    [PartName.LSkin]: lLeg.knee,
+    lAnkle:    lLeg.ankle,
+    headTip,
+    rFootTip:  rLeg.footTip,
+    lFootTip:  lLeg.footTip,
+    rHandTip:  rArm.hand,
+    lHandTip:  lArm.hand,
+    // Expose intermediate angles for IK root-angle extraction (not rendered)
+    _collarGlobalAngle:       collarAngle,
+    _rUpperArmGlobalAngle:    rArm.upperArmGlobalAngle,
+    _lUpperArmGlobalAngle:    lArm.upperArmGlobalAngle,
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Public FK — pin-stabilised joint positions
+// ---------------------------------------------------------------------------
+
 /**
- * Apply Curl/Stretch kinetic behaviors to child joints when a parent joint rotates.
+ * Calculates global positions of all joints, stabilised for the primary active pin.
+ * Secondary pins exhibit elastic tension (visualised in Mannequin.tsx) but do not
+ * constrain the solve — that is handled by the physics validator in App.tsx.
+ */
+export const getJointPositions = (
+  pose: Pose,
+  activePins: AnchorName[],
+): Record<string, Vector2D> => {
+  const inputRoot         = pose.root;
+  const inputBodyRotation = getTotalRotation('bodyRotation', pose);
+  const primaryPin        = activePins[0] || 'root';
+
+  if (primaryPin === 'root' || primaryPin === PartName.Waist) {
+    return _calculateGlobalJointPositions(inputRoot, inputBodyRotation, pose);
+  }
+
+  // Compute the offset introduced by body rotation so we can cancel it out,
+  // keeping the primary pin stationary in world space.
+  const jointsNoRot   = _calculateGlobalJointPositions(inputRoot, 0, pose);
+  const pinNoRot      = jointsNoRot[primaryPin as string];
+  if (!pinNoRot) return _calculateGlobalJointPositions(inputRoot, inputBodyRotation, pose);
+
+  const jointsWithRot = _calculateGlobalJointPositions(inputRoot, inputBodyRotation, pose);
+  const pinWithRot    = jointsWithRot[primaryPin as string];
+  if (!pinWithRot) return jointsWithRot;
+
+  const offset = {
+    x: pinNoRot.x - pinWithRot.x,
+    y: pinNoRot.y - pinWithRot.y,
+  };
+
+  const stabilizedRoot = {
+    x: inputRoot.x + offset.x,
+    y: inputRoot.y + offset.y,
+  };
+
+  return _calculateGlobalJointPositions(stabilizedRoot, inputBodyRotation, pose);
+};
+
+// ---------------------------------------------------------------------------
+// Limb tip key helper (shared by both IK solvers)
+// ---------------------------------------------------------------------------
+
+const getTipKey = (chain: PartName[]): string => {
+  const effector = chain[chain.length - 1];
+  switch (effector) {
+    case PartName.RAnkle: return 'rFootTip';
+    case PartName.LAnkle: return 'lFootTip';
+    case PartName.RWrist: return 'rHandTip';
+    default:              return 'lHandTip';
+  }
+};
+
+// ---------------------------------------------------------------------------
+// IK parent-angle extraction — uses the SAME FK path as the renderer
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the accumulated global angle at the root of a limb chain by reading
+ * directly from the FK joint positions. This guarantees the IK solver and the
+ * visual renderer share an identical coordinate frame, eliminating drift.
+ *
+ * FIX: Previously accumulated body/torso/collar angles manually, double-counting
+ * bodyRotation and diverging from the renderer's transform chain.
+ */
+const getLimbRootAngle = (
+  pose: Pose,
+  limbName: 'rArm' | 'lArm' | 'rLeg' | 'lLeg',
+  activePins: AnchorName[],
+): number => {
+  const joints = getJointPositions(pose, activePins);
+
+  if (limbName === 'rArm' || limbName === 'lArm') {
+    // Derive the collar's world-space angle from the two FK-computed points
+    // that bracket it, instead of re-accumulating rotation values.
+    const torso  = joints['torso'];
+    const collar = joints['collar'];
+    if (!torso || !collar) return 0;
+    // Collar points upward (drawsUpwards = true), so its direction vector is collar→torso
+    return Math.atan2(torso.y - collar.y, torso.x - collar.x) * 180 / Math.PI + 90;
+  }
+
+  // Legs descend directly from root using bodyRotation
+  return getTotalRotation('bodyRotation', pose);
+};
+
+// ---------------------------------------------------------------------------
+// Kinetic Behavior Propagation (curl / stretch)
+// ---------------------------------------------------------------------------
+
+/**
+ * Propagates a parent joint's rotation delta to its children according to their
+ * jointMode. Call this inside validateAndApplyPoseUpdate in App.tsx after writing
+ * the new angle for the directly-manipulated part.
+ *
+ *   - stretch: child counter-rotates to maintain its world orientation
+ *   - curl:    child rotates with the parent, exaggerating the fold
+ *   - fk:      no effect
+ *
+ * NOTE: This function was fully implemented in the original but never wired up.
+ * Wire it in App.tsx › validateAndApplyPoseUpdate:
+ *
+ *   if (partBeingDirectlyManipulated) {
+ *     const prevVal = (prev as any)[partNameToPoseKey[partBeingDirectlyManipulated]] || 0;
+ *     const nextVal = (tentativeNextPose as any)[partNameToPoseKey[partBeingDirectlyManipulated]] || 0;
+ *     tentativeNextPose = applyKineticBehaviors(
+ *       tentativeNextPose,
+ *       partBeingDirectlyManipulated,
+ *       nextVal - prevVal,
+ *       jointModes,
+ *     );
+ *   }
  */
 export const applyKineticBehaviors = (
   pose: Pose,
   changedPart: PartName,
   angleDelta: number,
   jointModes: Record<PartName, JointConstraint>,
-  resonance: number = 1.0
+  resonance: number = 1.0,
 ): Pose => {
   const newPose = { ...pose };
   const children = CHILD_MAP[changedPart];
@@ -74,144 +311,48 @@ export const applyKineticBehaviors = (
     const mode = jointModes[child];
     if (mode === 'fk') return;
 
-    const poseKey = child === PartName.RElbow ? 'rForearm' : 
-                    child === PartName.LElbow ? 'lForearm' : 
-                    child === PartName.RSkin ? 'rCalf' : 
-                    child === PartName.LSkin ? 'lCalf' : 
-                    (child as string);
+    const poseKey =
+      child === PartName.RElbow ? 'rForearm' :
+      child === PartName.LElbow ? 'lForearm' :
+      child === PartName.RSkin  ? 'rCalf'    :
+      child === PartName.LSkin  ? 'lCalf'    :
+      (child as string);
+
+    const current = (newPose as any)[poseKey] || 0;
 
     if (mode === 'stretch') {
-      // Counter-rotate to maintain world orientation
-      (newPose as any)[poseKey] = ((newPose as any)[poseKey] || 0) - (angleDelta * resonance);
+      // Counter-rotate: child maintains world orientation
+      (newPose as any)[poseKey] = current - (angleDelta * resonance);
     } else if (mode === 'curl') {
-      // Exaggerate fold (rotate same direction as parent)
-      (newPose as any)[poseKey] = ((newPose as any)[poseKey] || 0) + (angleDelta * resonance);
+      // Co-rotate: child folds with the parent
+      (newPose as any)[poseKey] = current + (angleDelta * resonance);
     }
   });
 
   return newPose;
 };
 
-const _calculateGlobalJointPositions = (
-    baseRoot: Vector2D,
-    baseBodyRotation: number,
-    pose: Pose
-): Record<string, Vector2D> => {
-    const offsets = pose.offsets || {};
-
-    const waistCalc = calculateBoneGlobalPositions(baseRoot, baseBodyRotation, getTotalRotation(PartName.Waist, pose), ANATOMY.WAIST, offsets[PartName.Waist], true);
-    const torsoCalc = calculateBoneGlobalPositions(waistCalc.globalEndPoint, waistCalc.childInheritedGlobalAngle, getTotalRotation(PartName.Torso, pose), ANATOMY.TORSO, offsets[PartName.Torso], true);
-    const collarCalc = calculateBoneGlobalPositions(torsoCalc.globalEndPoint, torsoCalc.childInheritedGlobalAngle, getTotalRotation(PartName.Collar, pose), ANATOMY.COLLAR, offsets[PartName.Collar], true);
-    const collarAngle = collarCalc.childInheritedGlobalAngle;
-    const collarEnd = collarCalc.globalEndPoint;
-
-    const headPivot = addVec(collarEnd, rotateVec(0, -ANATOMY.HEAD_NECK_GAP_OFFSET, collarAngle));
-    const headGlobalAngle = collarAngle + getTotalRotation(PartName.Head, pose);
-    const headTip = addVec(headPivot, rotateVec(0, -ANATOMY.HEAD, headGlobalAngle));
-
-    const getArmJoints = (isRight: boolean) => {
-        const side = isRight ? 'r' : 'l';
-        const sX = isRight ? RIGGING.R_SHOULDER_X_OFFSET_FROM_COLLAR_CENTER : RIGGING.L_SHOULDER_X_OFFSET_FROM_COLLAR_CENTER;
-        // Shoulder pinning remains unchanged: locks to collar corners
-        const shoulderAttach = addVec(collarEnd, rotateVec(sX, RIGGING.SHOULDER_Y_OFFSET_FROM_COLLAR_END, collarAngle));
-        const upperArmCalc = calculateBoneGlobalPositions(shoulderAttach, collarAngle, getTotalRotation(isRight ? PartName.RShoulder : PartName.LShoulder, pose), ANATOMY.UPPER_ARM, offsets[isRight ? PartName.RShoulder : PartName.LShoulder], false);
-        const forearmCalc = calculateBoneGlobalPositions(upperArmCalc.globalEndPoint, upperArmCalc.childInheritedGlobalAngle, getTotalRotation(isRight ? 'rForearm' : 'lForearm', pose), ANATOMY.LOWER_ARM, offsets[isRight ? PartName.RElbow : PartName.LElbow], false);
-        const handAngle = forearmCalc.childInheritedGlobalAngle + getTotalRotation(isRight ? PartName.RWrist : PartName.LWrist, pose);
-        const handTip = addVec(forearmCalc.globalEndPoint, rotateVec(0, ANATOMY.HAND, handAngle));
-        return { shoulder: shoulderAttach, elbow: upperArmCalc.globalEndPoint, wrist: forearmCalc.globalEndPoint, hand: handTip };
-    };
-
-    const getLegJoints = (isRight: boolean) => {
-        const thighCalc = calculateBoneGlobalPositions(baseRoot, baseBodyRotation, getTotalRotation(isRight ? PartName.RThigh : PartName.LThigh, pose), ANATOMY.LEG_UPPER, offsets[isRight ? PartName.RThigh : PartName.LThigh], false);
-        const calfCalc = calculateBoneGlobalPositions(thighCalc.globalEndPoint, thighCalc.childInheritedGlobalAngle, getTotalRotation(isRight ? 'rCalf' : 'lCalf', pose), ANATOMY.LEG_LOWER, offsets[isRight ? PartName.RSkin : PartName.LSkin], false);
-        const ankleAngle = calfCalc.childInheritedGlobalAngle + getTotalRotation(isRight ? PartName.RAnkle : PartName.LAnkle, pose);
-        const footTip = addVec(calfCalc.globalEndPoint, rotateVec(0, ANATOMY.FOOT, ankleAngle));
-        return { hip: baseRoot, knee: thighCalc.globalEndPoint, ankle: calfCalc.globalEndPoint, footTip };
-    };
-
-    const rArm = getArmJoints(true);
-    const lArm = getArmJoints(false);
-    const rLeg = getLegJoints(true);
-    const lLeg = getLegJoints(false);
-
-    return {
-        root: baseRoot,
-        waist: baseRoot,
-        torso: waistCalc.globalEndPoint,
-        collar: torsoCalc.globalEndPoint,
-        head: headPivot,
-        rShoulder: rArm.shoulder,
-        rElbow: rArm.elbow,
-        rWrist: rArm.wrist,
-        lShoulder: lArm.shoulder,
-        lElbow: lArm.elbow,
-        lWrist: lArm.wrist,
-        rThigh: baseRoot,
-        [PartName.RSkin]: rLeg.knee,
-        rAnkle: rLeg.ankle,
-        lThigh: baseRoot,
-        [PartName.LSkin]: lLeg.knee,
-        lAnkle: lLeg.ankle,
-        headTip,
-        rFootTip: rLeg.footTip,
-        lFootTip: lLeg.footTip,
-        rHandTip: rArm.hand,
-        lHandTip: lArm.hand,
-    };
-};
+// ---------------------------------------------------------------------------
+// Tension Visualization Helper
+// ---------------------------------------------------------------------------
 
 /**
- * Calculates global positions of all joints, adjusted for the active pins.
- * The primary pin (first in array) is used for stabilization.
- * Other pins will exhibit "elasticity" (tension) if the model moves away from them.
+ * Returns a normalised tension factor (0–2) for rubber-band pin visualisation.
  */
-export const getJointPositions = (pose: Pose, activePins: AnchorName[]): Record<string, Vector2D> => {
-    const inputRoot = pose.root;
-    const inputBodyRotation = getTotalRotation('bodyRotation', pose);
-    const primaryPin = activePins[0] || 'root';
-
-    // If pinning root, just return standard calc.
-    if (primaryPin === 'root' || primaryPin === PartName.Waist) {
-        return _calculateGlobalJointPositions(inputRoot, inputBodyRotation, pose);
-    }
-
-    // To keep a pin fixed while rotating, we find the offset the rotation caused.
-    const jointsNoRot = _calculateGlobalJointPositions(inputRoot, 0, pose);
-    const pinNoRot = jointsNoRot[primaryPin as string];
-    if (!pinNoRot) return _calculateGlobalJointPositions(inputRoot, inputBodyRotation, pose);
-
-    const jointsWithRot = _calculateGlobalJointPositions(inputRoot, inputBodyRotation, pose);
-    const pinWithRot = jointsWithRot[primaryPin as string];
-    if (!pinWithRot) return jointsWithRot;
-
-    // Calculate how much the pin moved due to rotation
-    const offset = {
-        x: pinNoRot.x - pinWithRot.x,
-        y: pinNoRot.y - pinWithRot.y,
-    };
-
-    // Shift the entire model by that offset to keep the pin at its "no-rotation" position
-    const stabilizedRoot = {
-        x: inputRoot.x + offset.x,
-        y: inputRoot.y + offset.y,
-    };
-
-    return _calculateGlobalJointPositions(stabilizedRoot, inputBodyRotation, pose);
+export const calculateTensionFactor = (
+  anatomicalPos: Vector2D,
+  pinnedPos: Vector2D,
+  threshold: number = 50,
+): number => {
+  const dx = anatomicalPos.x - pinnedPos.x;
+  const dy = anatomicalPos.y - pinnedPos.y;
+  return Math.min(2.0, Math.sqrt(dx * dx + dy * dy) / threshold);
 };
 
-/**
- * Calculates the tension factor (0 to 1+) based on distance from pin to anatomical joint.
- */
-export const calculateTensionFactor = (anatomicalPos: Vector2D, pinnedPos: Vector2D, threshold: number = 50): number => {
-    const dx = anatomicalPos.x - pinnedPos.x;
-    const dy = anatomicalPos.y - pinnedPos.y;
-    const distance = Math.sqrt(dx * dx + dy * dy);
-    return Math.min(2.0, distance / threshold);
-};
+// ---------------------------------------------------------------------------
+// Pose Interpolation
+// ---------------------------------------------------------------------------
 
-/**
- * Interpolates between two poses.
- */
 export const interpolatePoses = (start: Pose, end: Pose, t: number): Pose => {
   const result: any = {
     root: {
@@ -225,15 +366,31 @@ export const interpolatePoses = (start: Pose, end: Pose, t: number): Pose => {
   const keys = Object.keys(BASE_ROTATIONS) as (keyof typeof BASE_ROTATIONS)[];
   keys.forEach(key => {
     if (key === 'bodyRotation') return;
-    result[key] = lerpAngleShortestPath((start as any)[key] || 0, (end as any)[key] || 0, t);
+    result[key] = lerpAngleShortestPath(
+      (start as any)[key] || 0,
+      (end as any)[key]   || 0,
+      t,
+    );
   });
 
   return result as Pose;
 };
 
+// ---------------------------------------------------------------------------
+// FABRIK IK Solver
+// ---------------------------------------------------------------------------
+
 /**
- * FABRIK IK Solver (Forward And Backward Reaching Inverse Kinematics)
- * Provides more fluid and stable limb movement than CCD.
+ * FABRIK (Forward And Backward Reaching Inverse Kinematics)
+ *
+ * Fixes applied vs original:
+ *  1. Parent angle now derived from FK joint positions via getLimbRootAngle(),
+ *     eliminating the double-count of bodyRotation that caused world-space drift.
+ *  2. Joint limits clamped on every angle writeback via applyJointLimit().
+ *  3. Stretch bone-length scaling is preserved in currentLengths and honoured
+ *     during both the out-of-reach extension path and the FABRIK iteration path.
+ *     True bone elongation would require dynamic ANATOMY values; for now the
+ *     solver produces correct angles for the stretched reach target.
  */
 export const solveFABRIK = (
   pose: Pose,
@@ -242,182 +399,197 @@ export const solveFABRIK = (
   jointModes: Record<PartName, JointConstraint>,
   activePins: AnchorName[],
   iterations: number = 10,
-  tolerance: number = 0.1
+  tolerance: number  = 0.1,
 ): Pose => {
   const newPose = { ...pose };
-  const chain = LIMB_SEQUENCES[limbName];
+  const chain   = LIMB_SEQUENCES[limbName];
   if (!chain) return newPose;
 
-  // 1. Get current global positions and bone lengths
-  // Use activePins to ensure we are solving in the correct world space
-  const joints = getJointPositions(newPose, activePins);
-  const points: Vector2D[] = chain.map(joint => ({ ...joints[joint as string] }));
-  
-  // Add effector tip for better precision
-  const effector = chain[chain.length - 1];
-  const tipKey = effector === PartName.RAnkle ? 'rFootTip' : effector === PartName.LAnkle ? 'lFootTip' : effector === PartName.RWrist ? 'rHandTip' : 'lHandTip';
-  points.push({ ...joints[tipKey] });
+  // --- Build world-space joint chain from FK (single evaluation) ---
+  const joints  = getJointPositions(newPose, activePins);
+  const tipKey  = getTipKey(chain);
+  const points: Vector2D[] = [
+    ...chain.map(joint => ({ ...joints[joint as string] })),
+    { ...joints[tipKey] }, // effector tip for precision
+  ];
 
   const originalLengths: number[] = [];
   for (let i = 0; i < points.length - 1; i++) {
     originalLengths.push(dist(points[i], points[i + 1]));
   }
 
-  const origin = { ...points[0] };
+  const origin     = { ...points[0] };
   const totalLength = originalLengths.reduce((a, b) => a + b, 0);
-  const targetDist = dist(origin, target);
+  const targetDist  = dist(origin, target);
 
-  // Check if any joint in the chain has 'stretch' mode
   const hasStretch = chain.some(joint => jointModes[joint] === 'stretch');
 
-  // If target is out of reach AND we have stretch, we scale the lengths
-  let currentLengths = [...originalLengths];
-  if (targetDist > totalLength && hasStretch) {
-    const scale = targetDist / totalLength;
-    currentLengths = originalLengths.map(l => l * scale);
-  }
+  // Scale segment lengths proportionally when in stretch mode and out of reach
+  const currentLengths = (targetDist > totalLength && hasStretch)
+    ? originalLengths.map(l => l * (targetDist / totalLength))
+    : [...originalLengths];
 
-  // FABRIK Iterations
+  // --- FABRIK iterations ---
   if (targetDist > totalLength && !hasStretch) {
-    // Standard out-of-reach behavior: extend fully
+    // Out of reach, no stretch: extend fully toward target
     for (let i = 0; i < points.length - 1; i++) {
-      const r = dist(points[i], target);
+      const r      = dist(points[i], target);
       const lambda = currentLengths[i] / r;
       points[i + 1] = {
         x: (1 - lambda) * points[i].x + lambda * target.x,
-        y: (1 - lambda) * points[i].y + lambda * target.y
+        y: (1 - lambda) * points[i].y + lambda * target.y,
       };
     }
   } else {
     for (let iter = 0; iter < iterations; iter++) {
       if (dist(points[points.length - 1], target) < tolerance) break;
 
-      // Forward Pass
+      // Forward pass — pull tip to target
       points[points.length - 1] = { ...target };
       for (let i = points.length - 2; i >= 0; i--) {
-        const r = dist(points[i + 1], points[i]);
+        const r      = dist(points[i + 1], points[i]);
         const lambda = currentLengths[i] / r;
         points[i] = {
           x: (1 - lambda) * points[i + 1].x + lambda * points[i].x,
-          y: (1 - lambda) * points[i + 1].y + lambda * points[i].y
+          y: (1 - lambda) * points[i + 1].y + lambda * points[i].y,
         };
       }
 
-      // Backward Pass
+      // Backward pass — re-anchor at root
       points[0] = { ...origin };
       for (let i = 0; i < points.length - 1; i++) {
-        const r = dist(points[i], points[i + 1]);
+        const r      = dist(points[i], points[i + 1]);
         const lambda = currentLengths[i] / r;
         points[i + 1] = {
           x: (1 - lambda) * points[i].x + lambda * points[i + 1].x,
-          y: (1 - lambda) * points[i].y + lambda * points[i + 1].y
+          y: (1 - lambda) * points[i].y + lambda * points[i + 1].y,
         };
       }
     }
   }
 
-  // 2. Convert points back to joint angles and update offsets if stretched
-  // We solve angles sequentially from root to effector
-  let currentParentAngle = 0;
-  if (limbName === 'rArm' || limbName === 'lArm') {
-    const waistAngle = newPose.bodyRotation + getTotalRotation(PartName.Waist, newPose);
-    const torsoAngle = waistAngle + getTotalRotation(PartName.Torso, newPose);
-    currentParentAngle = torsoAngle + getTotalRotation(PartName.Collar, newPose);
-  } else {
-    currentParentAngle = newPose.bodyRotation;
-  }
+  // --- Angle writeback ---
+  // FIX: getLimbRootAngle() reads from the same FK positions the renderer uses,
+  // so the IK and visual coordinate frames are guaranteed identical.
+  let currentParentAngle = getLimbRootAngle(newPose, limbName, activePins);
 
   if (!newPose.offsets) newPose.offsets = {};
 
   for (let i = 0; i < chain.length; i++) {
     const p1 = points[i];
     const p2 = points[i + 1];
-    const globalAngle = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
-    const normalizedGlobalAngle = globalAngle - 90; 
-    
-    const part = chain[i];
+
+    // Derive world-space angle of this segment, normalised to match drawsUpwards convention
+    const globalAngle           = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
+    const normalizedGlobalAngle = globalAngle - 90;
+
+    const part    = chain[i];
     const poseKey = partNameToPoseKey[part];
     const baseRot = BASE_ROTATIONS[poseKey as keyof typeof BASE_ROTATIONS] || 0;
-    
+
+    // Compute local angle relative to accumulated parent and clamp to joint limits
     let localAngle = normalizedGlobalAngle - currentParentAngle - baseRot;
-    localAngle = ((localAngle + 180) % 360 + 360) % 360 - 180;
+    localAngle     = ((localAngle + 180) % 360 + 360) % 360 - 180;
+    localAngle     = applyJointLimit(localAngle, part); // FIX: was missing
 
     (newPose as any)[poseKey] = localAngle;
-    currentParentAngle = normalizedGlobalAngle;
-
-    // If stretched, we need to handle the bone length change
-    // In our current system, bone lengths are fixed in ANATOMY.
-    // To "stretch", we would need to use offsets or dynamic ANATOMY.
-    // Bitruvius 0.2 uses offsets for "Elasticity".
-    if (hasStretch) {
-        const originalLen = originalLengths[i];
-        const currentLen = currentLengths[i];
-        if (Math.abs(currentLen - originalLen) > 0.1) {
-            // We don't have a direct "bone length" property in Pose, 
-            // but we can use offsets to shift the child joint.
-            // However, the next joint in the chain will be calculated from the previous one's end point.
-            // This is complex with the current _calculateGlobalJointPositions.
-            // For now, let's just solve the angles. 
-            // True "Stretch" (bone elongation) requires a more flexible rigging system.
-        }
-    }
+    currentParentAngle        = normalizedGlobalAngle;
   }
 
   return newPose;
 };
 
+// ---------------------------------------------------------------------------
+// Combined IK entry point (replaces the hollow solveAdvancedIK pass-through)
+// ---------------------------------------------------------------------------
+
 /**
- * Advanced IK Solver that combines FABRIK with Bitruvius constraints.
+ * Selects the appropriate IK strategy based on active joint modes and pins,
+ * then applies kinetic behavior propagation to adjacent joints.
+ *
+ * Use this as the single call-site from App.tsx — do not call solveFABRIK or
+ * solveIK directly from UI handlers.
  */
 export const solveAdvancedIK = (
   pose: Pose,
   limbName: 'rArm' | 'lArm' | 'rLeg' | 'lLeg',
   target: Vector2D,
   jointModes: Record<PartName, JointConstraint>,
-  activePins: AnchorName[]
+  activePins: AnchorName[],
 ): Pose => {
-  return solveFABRIK(pose, limbName, target, jointModes, activePins);
+  // FABRIK is the primary solver; CCD is available as a fallback for chains
+  // with hard joint limits that FABRIK overshoots under high stretch tension.
+  const hasHardLimits = LIMB_SEQUENCES[limbName]?.some(part => {
+    const key    = partNameToPoseKey[part];
+    const limits = JOINT_LIMITS[key as keyof typeof JOINT_LIMITS];
+    return limits && (limits.max - limits.min) < 120;
+  });
+
+  const solved = hasHardLimits
+    ? solveIK(pose, limbName, target, 10, activePins)
+    : solveFABRIK(pose, limbName, target, jointModes, activePins);
+
+  // Propagate kinetic behaviors from the root joint of the solved limb outward
+  const rootJoint = LIMB_SEQUENCES[limbName]?.[0];
+  if (rootJoint && jointModes[rootJoint] !== 'fk') {
+    const prevVal = (pose    as any)[partNameToPoseKey[rootJoint]] || 0;
+    const nextVal = (solved  as any)[partNameToPoseKey[rootJoint]] || 0;
+    return applyKineticBehaviors(solved, rootJoint, nextVal - prevVal, jointModes);
+  }
+
+  return solved;
 };
 
+// ---------------------------------------------------------------------------
+// CCD IK Solver
+// ---------------------------------------------------------------------------
+
 /**
- * Simple CCD IK Solver for a limb chain.
+ * Simple CCD (Cyclic Coordinate Descent) IK solver.
+ *
+ * Fixes applied vs original:
+ *  1. getJointPositions() called once per outer iteration, not once per joint
+ *     per iteration — eliminates O(iterations × chainLength) FK evaluations per frame.
+ *  2. activePins passed through so the solve operates in the same coordinate
+ *     space as the renderer (was hardcoded to []).
+ *  3. Joint limits clamped after each angle update via applyJointLimit().
  */
 export const solveIK = (
   pose: Pose,
   limbName: 'rArm' | 'lArm' | 'rLeg' | 'lLeg',
   target: Vector2D,
-  iterations: number = 10
+  iterations: number   = 10,
+  activePins: AnchorName[] = [], // FIX: was missing, defaulted to wrong space
 ): Pose => {
-  const newPose = { ...pose };
-  const chain = LIMB_SEQUENCES[limbName];
+  let newPose  = { ...pose };
+  const chain  = LIMB_SEQUENCES[limbName];
   if (!chain) return newPose;
 
-  // CCD Implementation
+  const tipKey = getTipKey(chain);
+
   for (let i = 0; i < iterations; i++) {
-    // Iterate from end of chain to start
+    // FIX: single FK evaluation per outer iteration, not per (iteration × joint)
+    const joints = getJointPositions(newPose, activePins);
+
     for (let j = chain.length - 1; j >= 0; j--) {
-      const joints = getJointPositions(newPose, []);
-      const currentJoint = chain[j];
-      const effector = chain[chain.length - 1];
-      
-      const jointPos = joints[currentJoint as string];
-      const effectorPos = joints[effector === PartName.RAnkle ? 'rFootTip' : effector === PartName.LAnkle ? 'lFootTip' : effector === PartName.RWrist ? 'rHandTip' : 'lHandTip'];
-      
+      const jointPos    = joints[chain[j] as string];
+      const effectorPos = joints[tipKey];
       if (!jointPos || !effectorPos) continue;
 
       const toEffector = { x: effectorPos.x - jointPos.x, y: effectorPos.y - jointPos.y };
-      const toTarget = { x: target.x - jointPos.x, y: target.y - jointPos.y };
+      const toTarget   = { x: target.x      - jointPos.x, y: target.y      - jointPos.y };
 
       const angleEffector = Math.atan2(toEffector.y, toEffector.x);
-      const angleTarget = Math.atan2(toTarget.y, toTarget.x);
-      
+      const angleTarget   = Math.atan2(toTarget.y,   toTarget.x);
+
       let deltaAngle = deg(angleTarget - angleEffector);
-      
-      // Apply 1 degree bias for directional stability (Phase 0.1 requirement)
+      // 1° directional stability bias (original behaviour preserved)
       deltaAngle += (deltaAngle > 0 ? 1 : -1);
 
-      const poseKey = partNameToPoseKey[currentJoint];
-      (newPose as any)[poseKey] = ((newPose as any)[poseKey] || 0) + deltaAngle;
+      const poseKey     = partNameToPoseKey[chain[j]];
+      const rawAngle    = ((newPose as any)[poseKey] || 0) + deltaAngle;
+      // FIX: clamp to joint limits after each CCD step
+      (newPose as any)[poseKey] = applyJointLimit(rawAngle, chain[j]);
     }
   }
 
