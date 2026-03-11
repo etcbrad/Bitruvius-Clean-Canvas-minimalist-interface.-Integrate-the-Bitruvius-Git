@@ -2,7 +2,7 @@
 import React, { useState, useRef, useMemo, useCallback, useEffect } from 'react';
 import { Pose, PartName, PartSelection, PartVisibility, AnchorName, partNameToPoseKey, JointConstraint, RenderMode, Vector2D, ViewMode, AnimationState, AnimationKeyframe, SavedPose, KinematicMode } from './types';
 import { RESET_POSE, FLOOR_HEIGHT, JOINT_LIMITS, ANATOMY, GROUND_STRIP_HEIGHT } from './constants'; 
-import { getJointPositions, getShortestAngleDiffDeg, interpolatePoses, solveIK, solveAdvancedIK, applyKineticBehaviors } from './utils/kinematics';
+import { getJointPositions, getShortestAngleDiffDeg, interpolatePoses, solveIK, solveAdvancedIK } from './utils/kinematics';
 import { Scanlines, SystemGuides } from './components/SystemGrid';
 import { Mannequin, getPartCategory, getPartCategoryDisplayName } from './components/Mannequin'; 
 import { DraggablePanel } from './components/DraggablePanel';
@@ -47,22 +47,7 @@ const App: React.FC = () => {
   }, [tweenValue, poseA, poseB]);
 
   const [viewMode, setViewMode] = useState<ViewMode>('default');
-  const [activePins, setActivePins] = useState<AnchorName[]>(() => {
-    const saved = localStorage.getItem('bitruvius_activePins');
-    return saved ? JSON.parse(saved) : [PartName.Waist];
-  });
-  const [hardStopEnabled, setHardStopEnabled] = useState<boolean>(() => {
-    const saved = localStorage.getItem('bitruvius_hardStopEnabled');
-    return saved ? JSON.parse(saved) : true;
-  });
-
-  useEffect(() => {
-    localStorage.setItem('bitruvius_activePins', JSON.stringify(activePins));
-  }, [activePins]);
-
-  useEffect(() => {
-    localStorage.setItem('bitruvius_hardStopEnabled', JSON.stringify(hardStopEnabled));
-  }, [hardStopEnabled]);
+  const [activePins, setActivePins] = useState<AnchorName[]>([PartName.Waist]); 
   const [pinnedState, setPinnedState] = useState<Record<string, Vector2D>>({});
   const [renderMode, setRenderMode] = useState<RenderMode>('default');
 
@@ -301,10 +286,10 @@ const App: React.FC = () => {
   // Dynamically calculate viewBox based on viewMode and windowSize
   const autoViewBox = useMemo(() => {
     const configs = {
-      zoomed: { x: -900, y: -1550, w: 1800, h: 1550 },
-      default: { x: -1112.5, y: -2212.5, w: 2225, h: 2212.5 },
-      lotte: { x: -1325, y: -2875, w: 2650, h: 2875 },
-      wide: { x: -1750, y: -4200, w: 3500, h: 4200 },
+      zoomed: { x: -900, y: 1950, w: 1800, h: 1550 },
+      default: { x: -1112.5, y: 1287.5, w: 2225, h: 2212.5 },
+      lotte: { x: -1325, y: 625, w: 2650, h: 2875 },
+      wide: { x: -1750, y: -700, w: 3500, h: 4200 },
     };
 
     if (viewMode === 'mobile') {
@@ -359,19 +344,17 @@ const App: React.FC = () => {
     // In Bitruvius 0.2, pins are elastic, but we still have a "Hard Stop" threshold
     const HARD_STOP_THRESHOLD = 300; // Maximum stretch before hard stop
 
-    if (hardStopEnabled) {
-      for (const pinName of activePins) {
-        const targetPos = pinnedState[pinName];
-        const currentPos = potentialJoints[pinName as keyof typeof potentialJoints];
+    for (const pinName of activePins) {
+      const targetPos = pinnedState[pinName];
+      const currentPos = potentialJoints[pinName as keyof typeof potentialJoints];
+      
+      if (targetPos && currentPos && !isCraneDragging) {
+        const dx = currentPos.x - targetPos.x;
+        const dy = currentPos.y - targetPos.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
         
-        if (targetPos && currentPos) {
-          const dx = currentPos.x - targetPos.x;
-          const dy = currentPos.y - targetPos.y;
-          const distance = Math.sqrt(dx * dx + dy * dy);
-          
-          if (distance > HARD_STOP_THRESHOLD) {
-            return false;
-          }
+        if (distance > HARD_STOP_THRESHOLD) {
+          return false;
         }
       }
     }
@@ -394,7 +377,7 @@ const App: React.FC = () => {
     }
 
     return true;
-  }, [isAirMode, hardStopEnabled]); 
+  }, [isAirMode]); 
 
   const validateAndApplyPoseUpdate = useCallback((
       proposedUpdates: Partial<Pose>,
@@ -475,28 +458,7 @@ const App: React.FC = () => {
       const newRootX = dragStartInfo.current.startRootX + dx;
       const newRootY = dragStartInfo.current.startRootY + dy;
 
-      let tentativePose = { ...ghostPose, root: { x: newRootX, y: newRootY } };
-
-      // Multi-Pin Safeguards: Run IK for all pinned limbs to keep them at their pinnedState
-      activePins.forEach(pinName => {
-        if (pinName === 'root' || pinName === PartName.Waist) return;
-        
-        let limb: 'rArm' | 'lArm' | 'rLeg' | 'lLeg' | null = null;
-        if (pinName === PartName.RWrist || pinName === 'rHandTip') limb = 'rArm';
-        else if (pinName === PartName.LWrist || pinName === 'lHandTip') limb = 'lArm';
-        else if (pinName === PartName.RAnkle || pinName === 'rFootTip') limb = 'rLeg';
-        else if (pinName === PartName.LAnkle || pinName === 'lFootTip') limb = 'lLeg';
-
-        if (limb && pinnedState[pinName]) {
-          if (kinematicMode === 'ik') {
-            tentativePose = solveIK(tentativePose, limb, pinnedState[pinName]);
-          } else {
-            tentativePose = solveAdvancedIK(tentativePose, limb, pinnedState[pinName], jointModes, activePins);
-          }
-        }
-      });
-
-      validateAndApplyPoseUpdate(tentativePose, null, false);
+      validateAndApplyPoseUpdate({ root: { x: newRootX, y: newRootY } }, null, false);
       
     } else if (isAdjusting && rotatingPart && rotationStartInfo.current) {
       const joints = getJointPositions(ghostPose, activePins);
@@ -516,13 +478,7 @@ const App: React.FC = () => {
         newRotationValue = Math.max(limits.min, Math.min(limits.max, newRotationValue));
       }
 
-      let tentativePose = { ...ghostPose, [partKey]: newRotationValue };
-      const actualAngleDelta = newRotationValue - ((ghostPose as any)[partKey] || 0);
-      if (Math.abs(actualAngleDelta) > 0.01) {
-        tentativePose = applyKineticBehaviors(tentativePose, rotatingPart, actualAngleDelta, jointModes);
-      }
-
-      validateAndApplyPoseUpdate(tentativePose, rotatingPart, false);
+      validateAndApplyPoseUpdate({ [partKey]: newRotationValue }, rotatingPart, false);
 
     } else if (isIKDragging && effectorPart) {
       handleIKMove(effectorPart, transformedPoint);
@@ -582,33 +538,6 @@ const App: React.FC = () => {
 
   useEffect(() => {
     updatePinnedState(activePins);
-    
-    // Multi-Pin Safeguards (Auto-Squat/Elasticity)
-    if (activePins.length > 1) {
-      setJointModes(prev => {
-        const next = { ...prev };
-        // If multiple pins are active, ensure limbs are at least in 'curl' (bend) or 'stretch' mode
-        // to prevent mathematical collapse when dragging the root or other pins.
-        
-        // Auto-B (Squat) for legs
-        const legs = [PartName.RAnkle, PartName.LAnkle];
-        legs.forEach(limb => {
-          if (next[limb] === 'fk') {
-            next[limb] = 'curl';
-          }
-        });
-
-        // Auto-S (Elasticity) for arms
-        const arms = [PartName.RWrist, PartName.LWrist];
-        arms.forEach(limb => {
-          if (next[limb] === 'fk') {
-            next[limb] = 'stretch';
-          }
-        });
-        
-        return next;
-      });
-    }
   }, [activePins]); // Sync pinnedState when activePins change
 
   const handleMouseDownOnPart = useCallback((part: PartName, e: React.MouseEvent<SVGGElement>) => {
@@ -797,14 +726,8 @@ const App: React.FC = () => {
     if (!primarySelectedPart) return;
     const partKey = partNameToPoseKey[primarySelectedPart];
     
-    let tentativePose = { ...activePose, [partKey]: newValue };
-    const actualAngleDelta = newValue - ((activePose as any)[partKey] || 0);
-    if (Math.abs(actualAngleDelta) > 0.01) {
-      tentativePose = applyKineticBehaviors(tentativePose, primarySelectedPart, actualAngleDelta, jointModes);
-    }
-
-    validateAndApplyPoseUpdate(tentativePose, primarySelectedPart, false);
-  }, [primarySelectedPart, activePose, jointModes, validateAndApplyPoseUpdate]);
+    validateAndApplyPoseUpdate({ [partKey]: newValue }, primarySelectedPart, false);
+  }, [primarySelectedPart, validateAndApplyPoseUpdate]);
 
   const handleBodyRotationWheelChange = useCallback((newValue: number) => {
     validateAndApplyPoseUpdate({ bodyRotation: newValue }, null, false);
@@ -1038,21 +961,6 @@ const App: React.FC = () => {
                     </button>
                   ))}
                 </div>
-                
-                <div className="flex flex-col gap-1 border-t border-white/10 pt-2 mt-2">
-                  <span className="text-white/40 uppercase text-[8px]">Elasticity_Constraints</span>
-                  <button
-                    onClick={() => setHardStopEnabled(prev => !prev)}
-                    className={`text-[9px] text-left px-2 py-1 transition-all border ${
-                      hardStopEnabled
-                      ? 'bg-accent-red/30 border-accent-red text-accent-red'
-                      : 'bg-white/5 border-transparent text-white/50 hover:bg-white/10'
-                    }`}
-                  >
-                    {hardStopEnabled ? 'HARD STOP: ENABLED' : 'HARD STOP: DISABLED'}
-                  </button>
-                </div>
-
                 <div className="flex flex-col gap-1 border-t border-white/10 pt-2 mt-2 items-center">
                   <span className="text-white/40 uppercase text-[8px]">Global_Rotation_Angle</span>
                   <RotationWheelControl
@@ -1260,7 +1168,7 @@ const App: React.FC = () => {
                 <div className="flex gap-2"><span className="text-accent-green">●</span> <span>PHASE 0.2.1: ENVIRONMENTAL CONTEXT (FLOOR PLANE $Y=0$) - [COMPLETE]</span></div>
                 <div className="flex gap-2"><span className="text-accent-green">●</span> <span>PHASE 0.2.2: ELASTIC ANKLE CONSTRAINTS (TENSION PHYSICS) - [COMPLETE]</span></div>
                 <div className="flex gap-2"><span className="text-accent-green">●</span> <span>PHASE 0.2.3: ANIMATION ENGINE (KEYFRAME SEQUENCER) - [COMPLETE]</span></div>
-                <div className="flex gap-2"><span className="text-accent-green">●</span> <span>PHASE 0.2.4: MULTI-PIN SAFEGUARDS (AUTO-SQUAT/ELASTICITY) - [COMPLETE]</span></div>
+                <div className="flex gap-2"><span className="text-focus-ring">○</span> <span>PHASE 0.2.4: MULTI-PIN SAFEGUARDS (AUTO-SQUAT/ELASTICITY) - [PLANNED]</span></div>
                 <div className="flex gap-2"><span className="text-focus-ring">○</span> <span>PHASE 0.3.0: PROP SYSTEM & COLLISION (INTERACTIVE OBJECTS) - [PLANNED]</span></div>
               </div>
             )}

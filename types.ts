@@ -122,23 +122,18 @@ export type ViewMode = 'zoomed' | 'default' | 'lotte' | 'wide' | 'mobile'; // Ad
 
 export type KinematicMode = 'fk' | 'ik' | 'fabrik';
 
-export type EasingType = 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'spring';
-
-export interface PoseSlot {
+export type AnimationKeyframe = {
   id: string;
-  label: string;
   pose: Pose;
-  durationToNext: number;
-  easing: EasingType;
-}
+  duration: number; // ms to reach this keyframe
+};
 
-export interface SequenceState {
-  slots: PoseSlot[];
-  loop: boolean;
+export type AnimationState = {
+  keyframes: AnimationKeyframe[];
   isPlaying: boolean;
-  scrubPosition: number;
-  showOnionSkin: boolean;
-}
+  currentFrameIndex: number;
+  loop: boolean;
+};
 
 export type SavedPose = {
   id: string;
