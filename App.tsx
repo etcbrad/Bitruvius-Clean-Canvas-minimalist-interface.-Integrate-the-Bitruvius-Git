@@ -22,13 +22,47 @@ interface PanelRect {
 
 const App: React.FC = () => {
   const [activePose, setActivePose] = useState<Pose>(RESET_POSE);
+  const [ghostPose, setGhostPose] = useState<Pose>(RESET_POSE);
+  const isDragging = useRef(false);
   const undoStack = useRef<Pose[]>([]);
   const redoStack = useRef<Pose[]>([]); 
   redoStack.current = []; // Clear redo stack on mount
 
 
+  const [activeTab, setActiveTab] = useState<'model' | 'animation'>('model');
+  const [poseA, setPoseA] = useState<Pose | null>(null);
+  const [poseB, setPoseB] = useState<Pose | null>(null);
+  const [tweenValue, setTweenValue] = useState(0); // 0 to 100
+
+  const capturePoseA = () => setPoseA({ ...activePose });
+  const capturePoseB = () => setPoseB({ ...activePose });
+
+  useEffect(() => {
+    if (poseA && poseB) {
+      const t = tweenValue / 100;
+      const interpolated = interpolatePoses(poseA, poseB, t);
+      setActivePose(interpolated);
+      setGhostPose(interpolated);
+    }
+  }, [tweenValue, poseA, poseB]);
+
   const [viewMode, setViewMode] = useState<ViewMode>('default');
-  const [activePins, setActivePins] = useState<AnchorName[]>([PartName.Waist]); 
+  const [activePins, setActivePins] = useState<AnchorName[]>(() => {
+    const saved = localStorage.getItem('bitruvius_activePins');
+    return saved ? JSON.parse(saved) : [PartName.Waist];
+  });
+  const [hardStopEnabled, setHardStopEnabled] = useState<boolean>(() => {
+    const saved = localStorage.getItem('bitruvius_hardStopEnabled');
+    return saved ? JSON.parse(saved) : true;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('bitruvius_activePins', JSON.stringify(activePins));
+  }, [activePins]);
+
+  useEffect(() => {
+    localStorage.setItem('bitruvius_hardStopEnabled', JSON.stringify(hardStopEnabled));
+  }, [hardStopEnabled]);
   const [pinnedState, setPinnedState] = useState<Record<string, Vector2D>>({});
   const [renderMode, setRenderMode] = useState<RenderMode>('default');
 
@@ -139,13 +173,13 @@ const App: React.FC = () => {
     if (limb) {
       let solvedPose: Pose;
       if (kinematicMode === 'ik') {
-        solvedPose = solveIK(activePose, limb, targetPos);
+        solvedPose = solveIK(ghostPose, limb, targetPos);
       } else {
-        solvedPose = solveAdvancedIK(activePose, limb, targetPos, jointModes, activePins);
+        solvedPose = solveAdvancedIK(ghostPose, limb, targetPos, jointModes, activePins);
       }
-      setActivePose(solvedPose);
+      setGhostPose(solvedPose);
     }
-  }, [activePose, jointModes, activePins, kinematicMode]);
+  }, [ghostPose, jointModes, activePins, kinematicMode]);
 
   const [userPoses, setUserPoses] = useState<SavedPose[]>(() => {
     const saved = localStorage.getItem('bitruvius-saved-poses');
@@ -188,6 +222,7 @@ const App: React.FC = () => {
   const [isCraneActive] = useState(false);
   const [isCraneDragging, setIsCraneDragging] = useState(false);
   const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: number; startRootY: number } | null>(dragStartInfoInitial());
+  const dragStartPose = useRef<Pose | null>(null);
 
   function dragStartInfoInitial() {
     return { startX: 0, startY: 0, startRootX: 0, startRootY: 0 };
@@ -245,6 +280,7 @@ const App: React.FC = () => {
     'pin-options': false,
     'display-modes': false,
     'animation-engine': false,
+    'ab-engine': true,
     'saved-poses': true,
     'system-monitor': false,
     'hotkey-commands': false,
@@ -323,17 +359,19 @@ const App: React.FC = () => {
     // In Bitruvius 0.2, pins are elastic, but we still have a "Hard Stop" threshold
     const HARD_STOP_THRESHOLD = 300; // Maximum stretch before hard stop
 
-    for (const pinName of activePins) {
-      const targetPos = pinnedState[pinName];
-      const currentPos = potentialJoints[pinName as keyof typeof potentialJoints];
-      
-      if (targetPos && currentPos && !isCraneDragging) {
-        const dx = currentPos.x - targetPos.x;
-        const dy = currentPos.y - targetPos.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
+    if (hardStopEnabled) {
+      for (const pinName of activePins) {
+        const targetPos = pinnedState[pinName];
+        const currentPos = potentialJoints[pinName as keyof typeof potentialJoints];
         
-        if (distance > HARD_STOP_THRESHOLD) {
-          return false;
+        if (targetPos && currentPos && !isCraneDragging) {
+          const dx = currentPos.x - targetPos.x;
+          const dy = currentPos.y - targetPos.y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          
+          if (distance > HARD_STOP_THRESHOLD) {
+            return false;
+          }
         }
       }
     }
@@ -356,14 +394,14 @@ const App: React.FC = () => {
     }
 
     return true;
-  }, [isAirMode]); 
+  }, [isAirMode, hardStopEnabled]); 
 
   const validateAndApplyPoseUpdate = useCallback((
       proposedUpdates: Partial<Pose>,
       partBeingDirectlyManipulated: PartName | null,
       isEffectorDrag: boolean,
   ) => {
-      setActivePose(prev => {
+      setGhostPose(prev => {
           let tentativeNextPose: Pose = { ...prev, ...proposedUpdates };
 
           if (!isValidMove(
@@ -379,31 +417,48 @@ const App: React.FC = () => {
               return prev;
           }
 
-          undoStack.current.push(prev);
-          redoStack.current.length = 0;
           return tentativeNextPose;
       });
   }, [activePins, pinnedState, isAirMode, isCraneDragging, isValidMove]);
 
+  // Exponential Decay Smoothing (Bitruvius 0.1 requirement)
+  useEffect(() => {
+    if (!isPoweredOn) return;
+    
+    let rafId: number;
+    const smooth = () => {
+      setActivePose(current => {
+        // If not dragging, we can either snap or continue smoothing
+        // The "5-frame snap" logic is handled in handleMouseUp
+        const smoothingFactor = isDragging.current ? 0.3 : 0.15;
+        return interpolatePoses(current, ghostPose, smoothingFactor);
+      });
+      rafId = requestAnimationFrame(smooth);
+    };
+    
+    rafId = requestAnimationFrame(smooth);
+    return () => cancelAnimationFrame(rafId);
+  }, [ghostPose, isPoweredOn]);
+
   const handleUndo = useCallback(() => {
     if (undoStack.current.length > 0) {
-      setActivePose(prev => {
-        redoStack.current.push(prev); 
-        const nextPose = undoStack.current.pop()!;
-        return nextPose;
-      });
+      const prev = activePose;
+      redoStack.current.push(prev); 
+      const nextPose = undoStack.current.pop()!;
+      setGhostPose(nextPose);
+      setActivePose(nextPose);
     }
-  }, []);
+  }, [activePose]);
 
   const handleRedo = useCallback(() => {
     if (redoStack.current.length > 0) {
-      setActivePose(prev => {
-        undoStack.current.push(prev);
-        const nextPose = redoStack.current.pop()!;
-        return nextPose;
-      });
+      const prev = activePose;
+      undoStack.current.push(prev);
+      const nextPose = redoStack.current.pop()!;
+      setGhostPose(nextPose);
+      setActivePose(nextPose);
     }
-  }, []);
+  }, [activePose]);
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!svgRef.current) return;
@@ -423,7 +478,7 @@ const App: React.FC = () => {
       validateAndApplyPoseUpdate({ root: { x: newRootX, y: newRootY } }, null, false);
       
     } else if (isAdjusting && rotatingPart && rotationStartInfo.current) {
-      const joints = getJointPositions(activePose, activePins);
+      const joints = getJointPositions(ghostPose, activePins);
       const pivot = joints[rotatingPart]; 
       if (!pivot) return;
       
@@ -445,7 +500,7 @@ const App: React.FC = () => {
     } else if (isIKDragging && effectorPart) {
       handleIKMove(effectorPart, transformedPoint);
     }
-  }, [isAdjusting, rotatingPart, isCraneDragging, isIKDragging, effectorPart, activePose, validateAndApplyPoseUpdate, activePins, handleIKMove]);
+  }, [isAdjusting, rotatingPart, isCraneDragging, isIKDragging, effectorPart, ghostPose, validateAndApplyPoseUpdate, activePins, handleIKMove]);
 
   const updatePinnedState = useCallback((pins: AnchorName[]) => {
     const joints = getJointPositions(activePose, pins);
@@ -457,6 +512,19 @@ const App: React.FC = () => {
   }, [activePose]);
 
   const handleMouseUp = useCallback(() => {
+    if (isDragging.current) {
+      // 5-frame snap (Bitruvius 0.1 requirement)
+      // We snap activePose to ghostPose immediately on release
+      setActivePose(ghostPose);
+      
+      // Save to undo stack on release
+      if (dragStartPose.current) {
+        undoStack.current.push(dragStartPose.current);
+        redoStack.current.length = 0;
+      }
+    }
+
+    isDragging.current = false;
     setIsAdjusting(false);
     setRotatingPart(null);
     setIsCraneDragging(false);
@@ -465,7 +533,7 @@ const App: React.FC = () => {
     setIsIKDragging(false);
     rotationStartInfo.current = null;
     dragStartInfo.current = dragStartInfoInitial(); 
-  }, []);
+  }, [ghostPose, activePose]);
 
   const handleDoubleClickOnPart = useCallback((part: PartName, e: React.MouseEvent<SVGGElement>) => {
     e.stopPropagation();
@@ -487,12 +555,30 @@ const App: React.FC = () => {
 
   useEffect(() => {
     updatePinnedState(activePins);
+    
+    // Multi-Pin Safeguards (Auto-Squat/Elasticity)
+    if (activePins.length > 1) {
+      setJointModes(prev => {
+        const next = { ...prev };
+        // If multiple pins are active, ensure limbs are at least in 'curl' (bend) or 'stretch' mode
+        // to prevent mathematical collapse when dragging the root or other pins.
+        const limbs = [PartName.RWrist, PartName.LWrist, PartName.RAnkle, PartName.LAnkle];
+        limbs.forEach(limb => {
+          if (next[limb] === 'fk') {
+            next[limb] = 'stretch'; // Auto-S (Elasticity) as default safeguard
+          }
+        });
+        return next;
+      });
+    }
   }, [activePins]); // Sync pinnedState when activePins change
 
   const handleMouseDownOnPart = useCallback((part: PartName, e: React.MouseEvent<SVGGElement>) => {
     e.stopPropagation();
     if (!svgRef.current) return;
 
+    isDragging.current = true;
+    dragStartPose.current = activePose;
     setSelectedParts(prev => {
       const next = { ...prev };
       Object.keys(next).forEach(k => next[k as PartName] = k === part);
@@ -753,8 +839,26 @@ const App: React.FC = () => {
           currentZIndex={panelZIndices['model-settings-panel']}
           className="w-56 max-h-[90vh] overflow-y-auto custom-scrollbar" // Allow scrolling if content is too long
         >
-          {/* Section: Joint Control */}
-          <div className="flex flex-col gap-1 w-full text-left border-b border-white/10 pb-2 mb-2">
+          {/* Tab Bar */}
+          <div className="flex border-b border-white/20 mb-4">
+            <button 
+              onClick={() => setActiveTab('model')}
+              className={`flex-1 py-1 text-[9px] font-bold tracking-widest transition-all ${activeTab === 'model' ? 'text-focus-ring border-b-2 border-focus-ring' : 'text-white/40 hover:text-white/70'}`}
+            >
+              MODEL
+            </button>
+            <button 
+              onClick={() => setActiveTab('animation')}
+              className={`flex-1 py-1 text-[9px] font-bold tracking-widest transition-all ${activeTab === 'animation' ? 'text-focus-ring border-b-2 border-focus-ring' : 'text-white/40 hover:text-white/70'}`}
+            >
+              ANIMATION
+            </button>
+          </div>
+
+          {activeTab === 'model' ? (
+            <>
+              {/* Section: Joint Control */}
+              <div className="flex flex-col gap-1 w-full text-left border-b border-white/10 pb-2 mb-2">
             <button 
               onClick={() => toggleSection('joint-control')}
               className="flex items-center justify-between w-full text-focus-ring font-bold uppercase tracking-wide hover:text-white transition-colors"
@@ -890,6 +994,21 @@ const App: React.FC = () => {
                     </button>
                   ))}
                 </div>
+                
+                <div className="flex flex-col gap-1 border-t border-white/10 pt-2 mt-2">
+                  <span className="text-white/40 uppercase text-[8px]">Elasticity_Constraints</span>
+                  <button
+                    onClick={() => setHardStopEnabled(prev => !prev)}
+                    className={`text-[9px] text-left px-2 py-1 transition-all border ${
+                      hardStopEnabled
+                      ? 'bg-accent-red/30 border-accent-red text-accent-red'
+                      : 'bg-white/5 border-transparent text-white/50 hover:bg-white/10'
+                    }`}
+                  >
+                    {hardStopEnabled ? 'HARD STOP: ENABLED' : 'HARD STOP: DISABLED'}
+                  </button>
+                </div>
+
                 <div className="flex flex-col gap-1 border-t border-white/10 pt-2 mt-2 items-center">
                   <span className="text-white/40 uppercase text-[8px]">Global_Rotation_Angle</span>
                   <RotationWheelControl
@@ -1028,48 +1147,6 @@ const App: React.FC = () => {
             )}
           </div>
 
-          {/* Section: Animation Engine */}
-          <div className="flex flex-col gap-1 w-full text-left border-b border-white/10 pb-2 mb-2">
-            <button 
-              onClick={() => toggleSection('animation-engine')}
-              className="flex items-center justify-between w-full text-focus-ring font-bold uppercase tracking-wide hover:text-white transition-colors"
-            >
-              <span>ANIMATION ENGINE</span>
-              <span className="text-[10px] opacity-50">{expandedSections['animation-engine'] ? '▼' : '▶'}</span>
-            </button>
-
-            {expandedSections['animation-engine'] && (
-              <div className="mt-2 flex flex-col gap-1">
-                <div className="flex gap-1 mb-2">
-                  <button
-                    onClick={addKeyframe}
-                    className="flex-1 text-[9px] bg-accent-green/20 border border-accent-green/40 text-accent-green px-2 py-1 hover:bg-accent-green/30"
-                  >
-                    + KEYFRAME
-                  </button>
-                  <button
-                    onClick={animation.isPlaying ? stopAnimation : playAnimation}
-                    className={`flex-1 text-[9px] border px-2 py-1 ${
-                      animation.isPlaying 
-                      ? 'bg-accent-red/20 border-accent-red/40 text-accent-red' 
-                      : 'bg-accent-green/20 border-accent-green/40 text-accent-green'
-                    }`}
-                  >
-                    {animation.isPlaying ? 'STOP' : 'PLAY'}
-                  </button>
-                </div>
-                <div className="flex flex-col gap-1 max-h-32 overflow-y-auto custom-scrollbar">
-                  {animation.keyframes.map((k, i) => (
-                    <div key={k.id} className="flex items-center justify-between bg-white/5 p-1 border border-white/10 text-[8px]">
-                      <span>FRAME {i + 1} ({k.duration}ms)</span>
-                      <button onClick={() => removeKeyframe(k.id)} className="text-accent-red hover:text-white">REMOVE</button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
           {/* Section: System Monitor */}
           <div className="flex flex-col gap-1 w-full text-right border-b border-white/10 pb-2 mb-2">
             <button 
@@ -1139,7 +1216,7 @@ const App: React.FC = () => {
                 <div className="flex gap-2"><span className="text-accent-green">●</span> <span>PHASE 0.2.1: ENVIRONMENTAL CONTEXT (FLOOR PLANE $Y=0$) - [COMPLETE]</span></div>
                 <div className="flex gap-2"><span className="text-accent-green">●</span> <span>PHASE 0.2.2: ELASTIC ANKLE CONSTRAINTS (TENSION PHYSICS) - [COMPLETE]</span></div>
                 <div className="flex gap-2"><span className="text-accent-green">●</span> <span>PHASE 0.2.3: ANIMATION ENGINE (KEYFRAME SEQUENCER) - [COMPLETE]</span></div>
-                <div className="flex gap-2"><span className="text-focus-ring">○</span> <span>PHASE 0.2.4: MULTI-PIN SAFEGUARDS (AUTO-SQUAT/ELASTICITY) - [PLANNED]</span></div>
+                <div className="flex gap-2"><span className="text-accent-green">●</span> <span>PHASE 0.2.4: MULTI-PIN SAFEGUARDS (AUTO-SQUAT/ELASTICITY) - [COMPLETE]</span></div>
                 <div className="flex gap-2"><span className="text-focus-ring">○</span> <span>PHASE 0.3.0: PROP SYSTEM & COLLISION (INTERACTIVE OBJECTS) - [PLANNED]</span></div>
               </div>
             )}
@@ -1163,6 +1240,111 @@ const App: React.FC = () => {
               </div>
             )}
           </div>
+            </>
+          ) : (
+            <>
+              {/* Section: AB Pose to Pose Engine */}
+              <div className="flex flex-col gap-1 w-full text-left border-b border-white/10 pb-2 mb-2">
+                <button 
+                  onClick={() => toggleSection('ab-engine')}
+                  className="flex items-center justify-between w-full text-focus-ring font-bold uppercase tracking-wide hover:text-white transition-colors"
+                >
+                  <span>AB POSE ENGINE</span>
+                  <span className="text-[10px] opacity-50">{expandedSections['ab-engine'] ? '▼' : '▶'}</span>
+                </button>
+
+                {expandedSections['ab-engine'] && (
+                  <div className="mt-2 flex flex-col gap-2">
+                    <div className="flex gap-1">
+                      <button
+                        onClick={capturePoseA}
+                        className={`flex-1 text-[9px] border px-2 py-1 transition-all ${poseA ? 'bg-accent-green/20 border-accent-green/40 text-accent-green' : 'bg-white/5 border-white/10 text-white/50'}`}
+                      >
+                        {poseA ? 'SET POSE A' : 'CAPTURE A'}
+                      </button>
+                      <button
+                        onClick={capturePoseB}
+                        className={`flex-1 text-[9px] border px-2 py-1 transition-all ${poseB ? 'bg-accent-green/20 border-accent-green/40 text-accent-green' : 'bg-white/5 border-white/10 text-white/50'}`}
+                      >
+                        {poseB ? 'SET POSE B' : 'CAPTURE B'}
+                      </button>
+                    </div>
+
+                    {poseA && poseB && (
+                      <div className="flex flex-col gap-1 items-center mt-2">
+                        <span className="text-white/40 uppercase text-[8px]">Tween_Value: {tweenValue}%</span>
+                        <input 
+                          type="range" 
+                          min="0" 
+                          max="100" 
+                          value={tweenValue} 
+                          onChange={(e) => setTweenValue(parseInt(e.target.value))}
+                          className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-focus-ring"
+                        />
+                        <div className="flex justify-between w-full text-[7px] text-white/30 mt-1">
+                          <span>POSE_A</span>
+                          <span>POSE_B</span>
+                        </div>
+                      </div>
+                    )}
+                    
+                    <button
+                      onClick={() => {
+                        setPoseA(null);
+                        setPoseB(null);
+                        setTweenValue(0);
+                      }}
+                      className="text-[8px] text-accent-red/50 hover:text-accent-red mt-2 self-end"
+                    >
+                      RESET_AB
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Section: Animation Engine */}
+              <div className="flex flex-col gap-1 w-full text-left border-b border-white/10 pb-2 mb-2">
+                <button 
+                  onClick={() => toggleSection('animation-engine')}
+                  className="flex items-center justify-between w-full text-focus-ring font-bold uppercase tracking-wide hover:text-white transition-colors"
+                >
+                  <span>ANIMATION ENGINE</span>
+                  <span className="text-[10px] opacity-50">{expandedSections['animation-engine'] ? '▼' : '▶'}</span>
+                </button>
+
+                {expandedSections['animation-engine'] && (
+                  <div className="mt-2 flex flex-col gap-1">
+                    <div className="flex gap-1 mb-2">
+                      <button
+                        onClick={addKeyframe}
+                        className="flex-1 text-[9px] bg-accent-green/20 border border-accent-green/40 text-accent-green px-2 py-1 hover:bg-accent-green/30"
+                      >
+                        + KEYFRAME
+                      </button>
+                      <button
+                        onClick={animation.isPlaying ? stopAnimation : playAnimation}
+                        className={`flex-1 text-[9px] border px-2 py-1 ${
+                          animation.isPlaying 
+                          ? 'bg-accent-red/20 border-accent-red/40 text-accent-red' 
+                          : 'bg-accent-green/20 border-accent-green/40 text-accent-green'
+                        }`}
+                      >
+                        {animation.isPlaying ? 'STOP' : 'PLAY'}
+                      </button>
+                    </div>
+                    <div className="flex flex-col gap-1 max-h-32 overflow-y-auto custom-scrollbar">
+                      {animation.keyframes.map((k, i) => (
+                        <div key={k.id} className="flex items-center justify-between bg-white/5 p-1 border border-white/10 text-[8px]">
+                          <span>FRAME {i + 1} ({k.duration}ms)</span>
+                          <button onClick={() => removeKeyframe(k.id)} className="text-accent-red hover:text-white">REMOVE</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </DraggablePanel>
 
         <div className="w-full h-full bg-selection-super-light bg-triangle-grid flex items-center justify-center relative">
@@ -1184,6 +1366,7 @@ const App: React.FC = () => {
             <g>
               <Mannequin
                 pose={activePose}
+                ghostPose={isDragging.current ? ghostPose : undefined}
                 showOverlay={true}
                 selectedParts={selectedParts}
                 visibility={visibility}
@@ -1194,6 +1377,8 @@ const App: React.FC = () => {
                 onDoubleClickOnPart={handleDoubleClickOnPart}
                 onMouseDownOnRoot={(e) => { 
                   e.stopPropagation(); 
+                  isDragging.current = true;
+                  dragStartPose.current = activePose;
                   setIsCraneDragging(true); 
                   dragStartInfo.current = { startX: e.clientX, startY: e.clientY, startRootX: activePose.root.x, startRootY: activePose.root.y }; 
                 }}

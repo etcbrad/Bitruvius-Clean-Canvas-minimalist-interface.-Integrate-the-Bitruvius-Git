@@ -8,6 +8,7 @@ import { COLORS_BY_CATEGORY, COLORS } from './Bone'; // Import COLORS_BY_CATEGOR
 
 interface MannequinProps {
   pose: Pose;
+  ghostPose?: Pose;
   showOverlay?: boolean;
   selectedParts: PartSelection;
   visibility: PartVisibility;
@@ -63,6 +64,7 @@ export const getPartCategoryDisplayName = (part: PartName): string => { // Expor
 
 export const Mannequin: React.FC<MannequinProps> = ({
   pose,
+  ghostPose,
   showOverlay = true,
   selectedParts,
   visibility,
@@ -76,36 +78,39 @@ export const Mannequin: React.FC<MannequinProps> = ({
   renderMode = 'default',
 }) => {
   const joints = getJointPositions(pose, activePins);
+  const ghostJoints = ghostPose ? getJointPositions(ghostPose, activePins) : null;
   const offsets = pose.offsets || {};
 
-  const PartWrapper = ({ part, children }: { part: PartName; children?: React.ReactNode }) => {
+  const PartWrapper = ({ part, isGhost = false, children }: { part: PartName; isGhost?: boolean; children?: React.ReactNode }) => {
     const isSelected = selectedParts[part];
 
     const handleMouseDown = (e: React.MouseEvent<SVGGElement>) => { 
+      if (isGhost) return;
       e.stopPropagation(); 
       onMouseDownOnPart?.(part, e); 
     };
     
     const handleDoubleClick = (e: React.MouseEvent<SVGGElement>) => {
+      if (isGhost) return;
       e.stopPropagation();
       onDoubleClickOnPart?.(part, e);
     };
 
     return (
       <g 
-        className="cursor-pointer" 
+        className={isGhost ? "pointer-events-none opacity-20" : "cursor-pointer"} 
         onMouseDown={handleMouseDown}
         onDoubleClick={handleDoubleClick} // Reintroduced
-        role="button" // Indicate it's an interactive element
-        aria-label={`Select ${getPartCategoryDisplayName(part)}`}
-        aria-pressed={isSelected}
+        role={isGhost ? "presentation" : "button"} 
+        aria-label={isGhost ? undefined : `Select ${getPartCategoryDisplayName(part)}`}
+        aria-pressed={isGhost ? undefined : isSelected}
       >
         {React.Children.map(children, child =>
           // Explicitly cloneElement and pass `isSelected`, `renderMode`, and `jointConstraintMode`.
           React.isValidElement(child) && child.type === Bone
             ? React.cloneElement(child as React.ReactElement<BoneProps>, { 
-                isSelected: isSelected,
-                renderMode: renderMode,
+                isSelected: isGhost ? false : isSelected,
+                renderMode: isGhost ? 'wireframe' : renderMode,
                 jointConstraintMode: jointModes[part], // Pass kinetic mode
               })
             : child
@@ -119,18 +124,248 @@ export const Mannequin: React.FC<MannequinProps> = ({
   const PIN_INDICATOR_STROKE_COLOR = COLORS.SELECTION; // Light monochrome for stroke
   const PIN_INDICATOR_STROKE_WIDTH = 1;
 
+  const renderSkeleton = (p: Pose, j: any, isGhost: boolean = false) => {
+    const skeletonOffsets = p.offsets || {};
+    return (
+      <g 
+        className={isGhost ? "ghost-skeleton" : "main-skeleton"} 
+        transform={`translate(${j.root.x}, ${j.root.y}) rotate(${p.bodyRotation})`}
+      >
+        <PartWrapper part={PartName.Waist} isGhost={isGhost}>
+          <Bone 
+            rotation={getTotalRotation(PartName.Waist, p)} 
+            length={ANATOMY.WAIST} 
+            width={ANATOMY.WAIST_WIDTH} 
+            variant="waist-teardrop-pointy-up" 
+            drawsUpwards 
+            showOverlay={showOverlay} 
+            offset={skeletonOffsets[PartName.Waist]} 
+            visible={visibility[PartName.Waist]} 
+            partCategory={getPartCategory(PartName.Waist)}
+          >
+            <PartWrapper part={PartName.Torso} isGhost={isGhost}>
+              <Bone 
+                rotation={getTotalRotation(PartName.Torso, p)} 
+                length={ANATOMY.TORSO} 
+                width={ANATOMY.TORSO_WIDTH} 
+                variant="torso-teardrop-pointy-down" 
+                drawsUpwards 
+                showOverlay={showOverlay} 
+                offset={skeletonOffsets[PartName.Torso]} 
+                visible={visibility[PartName.Torso]} 
+                partCategory={getPartCategory(PartName.Torso)}
+              >
+                <PartWrapper part={PartName.Collar} isGhost={isGhost}>
+                  <Bone 
+                    rotation={getTotalRotation(PartName.Collar, p)} 
+                    length={ANATOMY.COLLAR} 
+                    width={ANATOMY.COLLAR_WIDTH} 
+                    variant="collar-horizontal-oval-shape" 
+                    drawsUpwards 
+                    showOverlay={showOverlay} 
+                    partCategory={getPartCategory(PartName.Collar)}
+                    offset={skeletonOffsets[PartName.Collar]} 
+                    visible={visibility[PartName.Collar]} 
+                  >
+                    
+                    <g transform={`translate(0, 0)`}>
+                      <PartWrapper part={PartName.Head} isGhost={isGhost}>
+                        <Bone 
+                          rotation={getTotalRotation(PartName.Head, p)} 
+                          length={ANATOMY.HEAD} 
+                          width={ANATOMY.HEAD_WIDTH} 
+                          variant="head-tall-oval" 
+                          drawsUpwards 
+                          showOverlay={showOverlay} 
+                          offset={skeletonOffsets[PartName.Head]} 
+                          visible={visibility[PartName.Head]} 
+                          partCategory={getPartCategory(PartName.Head)}
+                        />
+                      </PartWrapper>
+                    </g>
+
+                    <g transform={`translate(${RIGGING.R_SHOULDER_X_OFFSET_FROM_COLLAR_CENTER}, ${RIGGING.SHOULDER_Y_OFFSET_FROM_COLLAR_END}) rotate(${-getTotalRotation(PartName.Collar, p)})`}>
+                      <PartWrapper part={PartName.RShoulder} isGhost={isGhost}>
+                        <Bone 
+                          rotation={getTotalRotation(PartName.RShoulder, p)} 
+                          length={ANATOMY.UPPER_ARM} 
+                          width={ANATOMY.LIMB_WIDTH_ARM} 
+                          variant="deltoid-shape" 
+                          showOverlay={showOverlay} 
+                          offset={skeletonOffsets[PartName.RShoulder]} 
+                          visible={visibility[PartName.RShoulder]} 
+                          partCategory={getPartCategory(PartName.RShoulder)}
+                        >
+                          <PartWrapper part={PartName.RElbow} isGhost={isGhost}>
+                            <Bone 
+                              rotation={getTotalRotation('rForearm', p)} 
+                              length={ANATOMY.LOWER_ARM} 
+                              width={ANATOMY.LIMB_WIDTH_FOREARM} 
+                              variant="limb-tapered" 
+                              showOverlay={showOverlay} 
+                              offset={skeletonOffsets[PartName.RElbow]} 
+                              visible={visibility[PartName.RElbow]} 
+                              partCategory={getPartCategory(PartName.RElbow)}
+                            >
+                              <PartWrapper part={PartName.RWrist} isGhost={isGhost}>
+                                <Bone 
+                                  rotation={getTotalRotation(PartName.RWrist, p)} 
+                                  length={ANATOMY.HAND} 
+                                  width={ANATOMY.HAND_WIDTH} 
+                                  variant="hand-foot-arrowhead-shape" 
+                                  showOverlay={showOverlay} 
+                                  offset={skeletonOffsets[PartName.RWrist]} 
+                                  visible={visibility[PartName.RWrist]} 
+                                  partCategory={getPartCategory(PartName.RWrist)}
+                                />
+                              </PartWrapper>
+                            </Bone>
+                          </PartWrapper>
+                        </Bone>
+                      </PartWrapper>
+                    </g>
+
+                    <g transform={`translate(${RIGGING.L_SHOULDER_X_OFFSET_FROM_COLLAR_CENTER}, ${RIGGING.SHOULDER_Y_OFFSET_FROM_COLLAR_END}) rotate(${-getTotalRotation(PartName.Collar, p)})`}>
+                      <PartWrapper part={PartName.LShoulder} isGhost={isGhost}>
+                        <Bone 
+                          rotation={getTotalRotation(PartName.LShoulder, p)} 
+                          length={ANATOMY.UPPER_ARM} 
+                          width={ANATOMY.LIMB_WIDTH_ARM} 
+                          variant="deltoid-shape" 
+                          showOverlay={showOverlay} 
+                          offset={skeletonOffsets[PartName.LShoulder]} 
+                          visible={visibility[PartName.LShoulder]} 
+                          partCategory={getPartCategory(PartName.LShoulder)}
+                        >
+                          <PartWrapper part={PartName.LElbow} isGhost={isGhost}>
+                            <Bone 
+                              rotation={getTotalRotation('lForearm', p)} 
+                              length={ANATOMY.LOWER_ARM} 
+                              width={ANATOMY.LIMB_WIDTH_FOREARM} 
+                              variant="limb-tapered" 
+                              showOverlay={showOverlay} 
+                              offset={skeletonOffsets[PartName.LElbow]} 
+                              visible={visibility[PartName.LElbow]} 
+                              partCategory={getPartCategory(PartName.LElbow)}
+                            >
+                              <PartWrapper part={PartName.LWrist} isGhost={isGhost}>
+                                <Bone 
+                                  rotation={getTotalRotation(PartName.LWrist, p)} 
+                                  length={ANATOMY.HAND} 
+                                  width={ANATOMY.HAND_WIDTH} 
+                                  variant="hand-foot-arrowhead-shape" 
+                                  showOverlay={showOverlay} 
+                                  offset={skeletonOffsets[PartName.LWrist]} 
+                                  visible={visibility[PartName.LWrist]} 
+                                  partCategory={getPartCategory(PartName.LWrist)}
+                                />
+                              </PartWrapper>
+                            </Bone>
+                          </PartWrapper>
+                        </Bone>
+                      </PartWrapper>
+                    </g>
+                  </Bone>
+                </PartWrapper>
+              </Bone>
+            </PartWrapper>
+          </Bone>
+        </PartWrapper>
+
+        <PartWrapper part={PartName.RThigh} isGhost={isGhost}>
+          <Bone 
+            rotation={getTotalRotation(PartName.RThigh, p)} 
+            length={ANATOMY.LEG_UPPER} 
+            width={ANATOMY.LIMB_WIDTH_THIGH} 
+            variant="limb-tapered" 
+            showOverlay={showOverlay} 
+            offset={skeletonOffsets[PartName.RThigh]} 
+            visible={visibility[PartName.RThigh]} 
+            partCategory={getPartCategory(PartName.RThigh)}
+          >
+            <PartWrapper part={PartName.RSkin} isGhost={isGhost}>
+              <Bone 
+                rotation={getTotalRotation('rCalf', p)} 
+                length={ANATOMY.LEG_LOWER} 
+                width={ANATOMY.LIMB_WIDTH_CALF} 
+                variant="limb-tapered" 
+                showOverlay={showOverlay} 
+                offset={skeletonOffsets[PartName.RSkin]} 
+                visible={visibility[PartName.RSkin]} 
+                partCategory={getPartCategory(PartName.RSkin)}
+              >
+                <PartWrapper part={PartName.RAnkle} isGhost={isGhost}>
+                  <Bone 
+                    rotation={getTotalRotation(PartName.RAnkle, p)} 
+                    length={ANATOMY.FOOT} 
+                    width={ANATOMY.FOOT_WIDTH} 
+                    variant="hand-foot-arrowhead-shape" 
+                    showOverlay={showOverlay} 
+                    offset={skeletonOffsets[PartName.RAnkle]} 
+                    visible={visibility[PartName.RAnkle]} 
+                    partCategory={getPartCategory(PartName.RAnkle)}
+                  />
+                </PartWrapper>
+              </Bone>
+            </PartWrapper>
+          </Bone>
+        </PartWrapper>
+
+        <PartWrapper part={PartName.LThigh} isGhost={isGhost}>
+          <Bone 
+            rotation={getTotalRotation(PartName.LThigh, p)} 
+            length={ANATOMY.LEG_UPPER} 
+            width={ANATOMY.LIMB_WIDTH_THIGH} 
+            variant="limb-tapered" 
+            showOverlay={showOverlay} 
+            offset={skeletonOffsets[PartName.LThigh]} 
+            visible={visibility[PartName.LThigh]} 
+            partCategory={getPartCategory(PartName.LThigh)}
+          >
+            <PartWrapper part={PartName.LSkin} isGhost={isGhost}>
+              <Bone 
+                rotation={getTotalRotation('lCalf', p)} 
+                length={ANATOMY.LEG_LOWER} 
+                width={ANATOMY.LIMB_WIDTH_CALF} 
+                variant="limb-tapered" 
+                showOverlay={showOverlay} 
+                offset={skeletonOffsets[PartName.LSkin]} 
+                visible={visibility[PartName.LSkin]} 
+                partCategory={getPartCategory(PartName.LSkin)}
+              >
+                <PartWrapper part={PartName.LAnkle} isGhost={isGhost}>
+                  <Bone 
+                    rotation={getTotalRotation(PartName.LAnkle, p)} 
+                    length={ANATOMY.FOOT} 
+                    width={ANATOMY.FOOT_WIDTH} 
+                    variant="hand-foot-arrowhead-shape" 
+                    showOverlay={showOverlay} 
+                    offset={skeletonOffsets[PartName.LAnkle]} 
+                    visible={visibility[PartName.LAnkle]} 
+                    partCategory={getPartCategory(PartName.LAnkle)}
+                  />
+                </PartWrapper>
+              </Bone>
+            </PartWrapper>
+          </Bone>
+        </PartWrapper>
+      </g>
+    );
+  };
 
   return (
-    // The `pose.root.x` and `pose.root.y` used here are already compensated by getJointPositions
-    <g 
-      className={`mannequin-root ${className}`} 
-      transform={`translate(${joints.root.x}, ${joints.root.y}) rotate(${pose.bodyRotation})`}
-      aria-label="Mannequin figure"
-    >
-      {/* Root circle for drag */}
+    <g className={`mannequin-container ${className}`}>
+      {/* Render Ghost Skeleton First (Behind) */}
+      {ghostPose && ghostJoints && renderSkeleton(ghostPose, ghostJoints, true)}
+      
+      {/* Render Main Skeleton */}
+      {renderSkeleton(pose, joints, false)}
+
+      {/* Root circle for drag (Always on top of main skeleton) */}
       <g 
         onMouseDown={onMouseDownOnRoot} 
         className={'cursor-pointer'} 
+        transform={`translate(${joints.root.x}, ${joints.root.y}) rotate(${pose.bodyRotation})`}
         data-no-export={true}
         role="button"
         aria-label="Drag mannequin root"
@@ -145,279 +380,62 @@ export const Mannequin: React.FC<MannequinProps> = ({
       </g>
 
       {/* Multi-Pin Indicators with Tension Visualization */}
-      {activePins.map((pinName, index) => {
-        if (pinName === 'root') return null;
-        const currentPos = joints[pinName as keyof typeof joints];
-        const targetPos = pinnedState[pinName];
-        if (!currentPos || !targetPos) return null;
+      <g transform={`translate(${joints.root.x}, ${joints.root.y}) rotate(${pose.bodyRotation})`}>
+        {activePins.map((pinName, index) => {
+          if (pinName === 'root') return null;
+          const currentPos = joints[pinName as keyof typeof joints];
+          const targetPos = pinnedState[pinName];
+          if (!currentPos || !targetPos) return null;
 
-        const tension = calculateTensionFactor(currentPos, targetPos);
-        const isPrimary = index === 0;
-        
-        // Tension visual: Scale and luminance
-        const scale = 1 + tension * 0.5;
-        const opacity = 0.5 + tension * 0.5;
-        const color = isPrimary ? COLORS.ANCHOR_RED : "#FF4488"; // Pinkish-red for secondary pins
+          const tension = calculateTensionFactor(currentPos, targetPos);
+          const isPrimary = index === 0;
+          
+          // Tension visual: Scale and luminance
+          const scale = 1 + tension * 0.5;
+          const opacity = 0.5 + tension * 0.5;
+          const color = isPrimary ? COLORS.ANCHOR_RED : "#FF4488"; // Pinkish-red for secondary pins
 
-        return (
-          <g 
-            key={pinName}
-            transform={`translate(${currentPos.x - pose.root.x}, ${currentPos.y - pose.root.y})`} 
-            data-no-export={true}
-          >
-            {/* Rubber band line if tension exists */}
-            {tension > 0.05 && (
-              <line 
-                x1={0} y1={0} 
-                x2={targetPos.x - currentPos.x} 
-                y2={targetPos.y - currentPos.y}
-                stroke={color}
-                strokeWidth={2}
-                strokeDasharray="2,2"
+          return (
+            <g 
+              key={pinName}
+              transform={`translate(${currentPos.x - joints.root.x}, ${currentPos.y - joints.root.y})`} 
+              data-no-export={true}
+            >
+              {/* Rubber band line if tension exists */}
+              {tension > 0.05 && (
+                <line 
+                  x1={0} y1={0} 
+                  x2={targetPos.x - currentPos.x} 
+                  y2={targetPos.y - currentPos.y}
+                  stroke={color}
+                  strokeWidth={2}
+                  strokeDasharray="2,2"
+                  opacity={opacity}
+                />
+              )}
+              
+              {/* Target pin (ghost) */}
+              <circle 
+                cx={targetPos.x - currentPos.x} 
+                cy={targetPos.y - currentPos.y} 
+                r={PIN_INDICATOR_SIZE * 0.5} 
+                fill={color} 
+                opacity={0.3} 
+              />
+
+              {/* Active joint pin */}
+              <circle cx="0" cy="0" r={ANATOMY.ROOT_SIZE} fill="currentColor" opacity="0.1" />
+              <circle 
+                cx="0" cy="0" r={PIN_INDICATOR_SIZE * scale} 
+                fill={color}
+                stroke={PIN_INDICATOR_STROKE_COLOR} 
+                strokeWidth={PIN_INDICATOR_STROKE_WIDTH}
                 opacity={opacity}
               />
-            )}
-            
-            {/* Target pin (ghost) */}
-            <circle 
-              cx={targetPos.x - currentPos.x} 
-              cy={targetPos.y - currentPos.y} 
-              r={PIN_INDICATOR_SIZE * 0.5} 
-              fill={color} 
-              opacity={0.3} 
-            />
-
-            {/* Active joint pin */}
-            <circle cx="0" cy="0" r={ANATOMY.ROOT_SIZE} fill="currentColor" opacity="0.1" />
-            <circle 
-              cx="0" cy="0" r={PIN_INDICATOR_SIZE * scale} 
-              fill={color}
-              stroke={PIN_INDICATOR_STROKE_COLOR} 
-              strokeWidth={PIN_INDICATOR_STROKE_WIDTH}
-              opacity={opacity}
-            />
-          </g>
-        );
-      })}
-
-      <PartWrapper part={PartName.Waist}>
-        <Bone 
-          rotation={getTotalRotation(PartName.Waist, pose)} 
-          length={ANATOMY.WAIST} 
-          width={ANATOMY.WAIST_WIDTH} 
-          variant="waist-teardrop-pointy-up" 
-          drawsUpwards 
-          showOverlay={showOverlay} 
-          offset={offsets[PartName.Waist]} 
-          visible={visibility[PartName.Waist]} 
-          partCategory={getPartCategory(PartName.Waist)}
-        >
-          <PartWrapper part={PartName.Torso}>
-            <Bone 
-              rotation={getTotalRotation(PartName.Torso, pose)} 
-              length={ANATOMY.TORSO} 
-              width={ANATOMY.TORSO_WIDTH} 
-              variant="torso-teardrop-pointy-down" 
-              drawsUpwards 
-              showOverlay={showOverlay} 
-              offset={offsets[PartName.Torso]} 
-              visible={visibility[PartName.Torso]} 
-              partCategory={getPartCategory(PartName.Torso)}
-            >
-              <PartWrapper part={PartName.Collar}>
-                <Bone 
-                  rotation={getTotalRotation(PartName.Collar, pose)} 
-                  length={ANATOMY.COLLAR} 
-                  width={ANATOMY.COLLAR_WIDTH} 
-                  variant="collar-horizontal-oval-shape" 
-                  drawsUpwards 
-                  showOverlay={showOverlay} 
-                  partCategory={getPartCategory(PartName.Collar)}
-                  offset={offsets[PartName.Collar]} 
-                  visible={visibility[PartName.Collar]} 
-                >
-                  
-                  <g transform={`translate(0, 0)`}>
-                    <PartWrapper part={PartName.Head}>
-                      <Bone 
-                        rotation={getTotalRotation(PartName.Head, pose)} 
-                        length={ANATOMY.HEAD} 
-                        width={ANATOMY.HEAD_WIDTH} 
-                        variant="head-tall-oval" 
-                        drawsUpwards 
-                        showOverlay={showOverlay} 
-                        offset={offsets[PartName.Head]} 
-                        visible={visibility[PartName.Head]} 
-                        partCategory={getPartCategory(PartName.Head)}
-                      />
-                    </PartWrapper>
-                  </g>
-
-                  <g transform={`translate(${RIGGING.R_SHOULDER_X_OFFSET_FROM_COLLAR_CENTER}, ${RIGGING.SHOULDER_Y_OFFSET_FROM_COLLAR_END}) rotate(${-getTotalRotation(PartName.Collar, pose)})`}>
-                    <PartWrapper part={PartName.RShoulder}>
-                      <Bone 
-                        rotation={getTotalRotation(PartName.RShoulder, pose)} 
-                        length={ANATOMY.UPPER_ARM} 
-                        width={ANATOMY.LIMB_WIDTH_ARM} 
-                        variant="deltoid-shape" 
-                        showOverlay={showOverlay} 
-                        offset={offsets[PartName.RShoulder]} 
-                        visible={visibility[PartName.RShoulder]} 
-                        partCategory={getPartCategory(PartName.RShoulder)}
-                      >
-                        <PartWrapper part={PartName.RElbow}>
-                          <Bone 
-                            rotation={getTotalRotation('rForearm', pose)} 
-                            length={ANATOMY.LOWER_ARM} 
-                            width={ANATOMY.LIMB_WIDTH_FOREARM} 
-                            variant="limb-tapered" 
-                            showOverlay={showOverlay} 
-                            offset={offsets[PartName.RElbow]} 
-                            visible={visibility[PartName.RElbow]} 
-                            partCategory={getPartCategory(PartName.RElbow)}
-                          >
-                            <PartWrapper part={PartName.RWrist}>
-                              <Bone 
-                                rotation={getTotalRotation(PartName.RWrist, pose)} 
-                                length={ANATOMY.HAND} 
-                                width={ANATOMY.HAND_WIDTH} 
-                                variant="hand-foot-arrowhead-shape" 
-                                showOverlay={showOverlay} 
-                                offset={offsets[PartName.RWrist]} 
-                                visible={visibility[PartName.RWrist]} 
-                                partCategory={getPartCategory(PartName.RWrist)}
-                              />
-                            </PartWrapper>
-                          </Bone>
-                        </PartWrapper>
-                      </Bone>
-                    </PartWrapper>
-                  </g>
-
-                  <g transform={`translate(${RIGGING.L_SHOULDER_X_OFFSET_FROM_COLLAR_CENTER}, ${RIGGING.SHOULDER_Y_OFFSET_FROM_COLLAR_END}) rotate(${-getTotalRotation(PartName.Collar, pose)})`}>
-                    <PartWrapper part={PartName.LShoulder}>
-                      <Bone 
-                        rotation={getTotalRotation(PartName.LShoulder, pose)} 
-                        length={ANATOMY.UPPER_ARM} 
-                        width={ANATOMY.LIMB_WIDTH_ARM} 
-                        variant="deltoid-shape" 
-                        showOverlay={showOverlay} 
-                        offset={offsets[PartName.LShoulder]} 
-                        visible={visibility[PartName.LShoulder]} 
-                        partCategory={getPartCategory(PartName.LShoulder)}
-                      >
-                        <PartWrapper part={PartName.LElbow}>
-                          <Bone 
-                            rotation={getTotalRotation('lForearm', pose)} 
-                            length={ANATOMY.LOWER_ARM} 
-                            width={ANATOMY.LIMB_WIDTH_FOREARM} 
-                            variant="limb-tapered" 
-                            showOverlay={showOverlay} 
-                            offset={offsets[PartName.LElbow]} 
-                            visible={visibility[PartName.LElbow]} 
-                            partCategory={getPartCategory(PartName.LElbow)}
-                          >
-                            <PartWrapper part={PartName.LWrist}>
-                              <Bone 
-                                rotation={getTotalRotation(PartName.LWrist, pose)} 
-                                length={ANATOMY.HAND} 
-                                width={ANATOMY.HAND_WIDTH} 
-                                variant="hand-foot-arrowhead-shape" 
-                                showOverlay={showOverlay} 
-                                offset={offsets[PartName.LWrist]} 
-                                visible={visibility[PartName.LWrist]} 
-                                partCategory={getPartCategory(PartName.LWrist)}
-                              />
-                            </PartWrapper>
-                          </Bone>
-                        </PartWrapper>
-                      </Bone>
-                    </PartWrapper>
-                  </g>
-                </Bone>
-              </PartWrapper>
-            </Bone>
-          </PartWrapper>
-        </Bone>
-      </PartWrapper>
-
-      <PartWrapper part={PartName.RThigh}>
-        <Bone 
-          rotation={getTotalRotation(PartName.RThigh, pose)} 
-          length={ANATOMY.LEG_UPPER} 
-          width={ANATOMY.LIMB_WIDTH_THIGH} 
-          variant="limb-tapered" 
-          showOverlay={showOverlay} 
-          offset={offsets[PartName.RThigh]} 
-          visible={visibility[PartName.RThigh]} 
-          partCategory={getPartCategory(PartName.RThigh)}
-        >
-          <PartWrapper part={PartName.RSkin}>
-            <Bone 
-              rotation={getTotalRotation('rCalf', pose)} 
-              length={ANATOMY.LEG_LOWER} 
-              width={ANATOMY.LIMB_WIDTH_CALF} 
-              variant="limb-tapered" 
-              showOverlay={showOverlay} 
-              offset={offsets[PartName.RSkin]} 
-              visible={visibility[PartName.RSkin]} 
-              partCategory={getPartCategory(PartName.RSkin)}
-            >
-              <PartWrapper part={PartName.RAnkle}>
-                <Bone 
-                  rotation={getTotalRotation(PartName.RAnkle, pose)} 
-                  length={ANATOMY.FOOT} 
-                  width={ANATOMY.FOOT_WIDTH} 
-                  variant="hand-foot-arrowhead-shape" 
-                  showOverlay={showOverlay} 
-                  offset={offsets[PartName.RAnkle]} 
-                  visible={visibility[PartName.RAnkle]} 
-                  partCategory={getPartCategory(PartName.RAnkle)}
-                />
-              </PartWrapper>
-            </Bone>
-          </PartWrapper>
-        </Bone>
-      </PartWrapper>
-
-      <PartWrapper part={PartName.LThigh}>
-        <Bone 
-          rotation={getTotalRotation(PartName.LThigh, pose)} 
-          length={ANATOMY.LEG_UPPER} 
-          width={ANATOMY.LIMB_WIDTH_THIGH} 
-          variant="limb-tapered" 
-          showOverlay={showOverlay} 
-          offset={offsets[PartName.LThigh]} 
-          visible={visibility[PartName.LThigh]} 
-          partCategory={getPartCategory(PartName.LThigh)}
-        >
-          <PartWrapper part={PartName.LSkin}>
-            <Bone 
-              rotation={getTotalRotation('lCalf', pose)} 
-              length={ANATOMY.LEG_LOWER} 
-              width={ANATOMY.LIMB_WIDTH_CALF} 
-              variant="limb-tapered" 
-              showOverlay={showOverlay} 
-              offset={offsets[PartName.LSkin]} 
-              visible={visibility[PartName.LSkin]} 
-              partCategory={getPartCategory(PartName.LSkin)}
-            >
-              <PartWrapper part={PartName.LAnkle}>
-                <Bone 
-                  rotation={getTotalRotation(PartName.LAnkle, pose)} 
-                  length={ANATOMY.FOOT} 
-                  width={ANATOMY.FOOT_WIDTH} 
-                  variant="hand-foot-arrowhead-shape" 
-                  showOverlay={showOverlay} 
-                  offset={offsets[PartName.LAnkle]} 
-                  visible={visibility[PartName.LAnkle]} 
-                  partCategory={getPartCategory(PartName.LAnkle)}
-                />
-              </PartWrapper>
-            </Bone>
-          </PartWrapper>
-        </Bone>
-      </PartWrapper>
+            </g>
+          );
+        })}
+      </g>
     </g>
   );
 };
