@@ -2,7 +2,7 @@
 import React, { useState, useRef, useMemo, useCallback, useEffect } from 'react';
 import { Pose, PartName, PartSelection, PartVisibility, AnchorName, partNameToPoseKey, JointConstraint, RenderMode, Vector2D, ViewMode, AnimationState, AnimationKeyframe, SavedPose, KinematicMode } from './types';
 import { RESET_POSE, FLOOR_HEIGHT, JOINT_LIMITS, ANATOMY, GROUND_STRIP_HEIGHT } from './constants'; 
-import { getJointPositions, getShortestAngleDiffDeg, interpolatePoses, solveIK, solveAdvancedIK } from './utils/kinematics';
+import { getJointPositions, getShortestAngleDiffDeg, interpolatePoses, solveIK, solveAdvancedIK, applyKineticBehaviors } from './utils/kinematics';
 import { Scanlines, SystemGuides } from './components/SystemGrid';
 import { Mannequin, getPartCategory, getPartCategoryDisplayName } from './components/Mannequin'; 
 import { DraggablePanel } from './components/DraggablePanel';
@@ -301,10 +301,10 @@ const App: React.FC = () => {
   // Dynamically calculate viewBox based on viewMode and windowSize
   const autoViewBox = useMemo(() => {
     const configs = {
-      zoomed: { x: -900, y: 1950, w: 1800, h: 1550 },
-      default: { x: -1112.5, y: 1287.5, w: 2225, h: 2212.5 },
-      lotte: { x: -1325, y: 625, w: 2650, h: 2875 },
-      wide: { x: -1750, y: -700, w: 3500, h: 4200 },
+      zoomed: { x: -900, y: -1550, w: 1800, h: 1550 },
+      default: { x: -1112.5, y: -2212.5, w: 2225, h: 2212.5 },
+      lotte: { x: -1325, y: -2875, w: 2650, h: 2875 },
+      wide: { x: -1750, y: -4200, w: 3500, h: 4200 },
     };
 
     if (viewMode === 'mobile') {
@@ -364,7 +364,7 @@ const App: React.FC = () => {
         const targetPos = pinnedState[pinName];
         const currentPos = potentialJoints[pinName as keyof typeof potentialJoints];
         
-        if (targetPos && currentPos && !isCraneDragging) {
+        if (targetPos && currentPos) {
           const dx = currentPos.x - targetPos.x;
           const dy = currentPos.y - targetPos.y;
           const distance = Math.sqrt(dx * dx + dy * dy);
@@ -475,7 +475,28 @@ const App: React.FC = () => {
       const newRootX = dragStartInfo.current.startRootX + dx;
       const newRootY = dragStartInfo.current.startRootY + dy;
 
-      validateAndApplyPoseUpdate({ root: { x: newRootX, y: newRootY } }, null, false);
+      let tentativePose = { ...ghostPose, root: { x: newRootX, y: newRootY } };
+
+      // Multi-Pin Safeguards: Run IK for all pinned limbs to keep them at their pinnedState
+      activePins.forEach(pinName => {
+        if (pinName === 'root' || pinName === PartName.Waist) return;
+        
+        let limb: 'rArm' | 'lArm' | 'rLeg' | 'lLeg' | null = null;
+        if (pinName === PartName.RWrist || pinName === 'rHandTip') limb = 'rArm';
+        else if (pinName === PartName.LWrist || pinName === 'lHandTip') limb = 'lArm';
+        else if (pinName === PartName.RAnkle || pinName === 'rFootTip') limb = 'rLeg';
+        else if (pinName === PartName.LAnkle || pinName === 'lFootTip') limb = 'lLeg';
+
+        if (limb && pinnedState[pinName]) {
+          if (kinematicMode === 'ik') {
+            tentativePose = solveIK(tentativePose, limb, pinnedState[pinName]);
+          } else {
+            tentativePose = solveAdvancedIK(tentativePose, limb, pinnedState[pinName], jointModes, activePins);
+          }
+        }
+      });
+
+      validateAndApplyPoseUpdate(tentativePose, null, false);
       
     } else if (isAdjusting && rotatingPart && rotationStartInfo.current) {
       const joints = getJointPositions(ghostPose, activePins);
@@ -495,7 +516,13 @@ const App: React.FC = () => {
         newRotationValue = Math.max(limits.min, Math.min(limits.max, newRotationValue));
       }
 
-      validateAndApplyPoseUpdate({ [partKey]: newRotationValue }, rotatingPart, false);
+      let tentativePose = { ...ghostPose, [partKey]: newRotationValue };
+      const actualAngleDelta = newRotationValue - ((ghostPose as any)[partKey] || 0);
+      if (Math.abs(actualAngleDelta) > 0.01) {
+        tentativePose = applyKineticBehaviors(tentativePose, rotatingPart, actualAngleDelta, jointModes);
+      }
+
+      validateAndApplyPoseUpdate(tentativePose, rotatingPart, false);
 
     } else if (isIKDragging && effectorPart) {
       handleIKMove(effectorPart, transformedPoint);
@@ -562,12 +589,23 @@ const App: React.FC = () => {
         const next = { ...prev };
         // If multiple pins are active, ensure limbs are at least in 'curl' (bend) or 'stretch' mode
         // to prevent mathematical collapse when dragging the root or other pins.
-        const limbs = [PartName.RWrist, PartName.LWrist, PartName.RAnkle, PartName.LAnkle];
-        limbs.forEach(limb => {
+        
+        // Auto-B (Squat) for legs
+        const legs = [PartName.RAnkle, PartName.LAnkle];
+        legs.forEach(limb => {
           if (next[limb] === 'fk') {
-            next[limb] = 'stretch'; // Auto-S (Elasticity) as default safeguard
+            next[limb] = 'curl';
           }
         });
+
+        // Auto-S (Elasticity) for arms
+        const arms = [PartName.RWrist, PartName.LWrist];
+        arms.forEach(limb => {
+          if (next[limb] === 'fk') {
+            next[limb] = 'stretch';
+          }
+        });
+        
         return next;
       });
     }
@@ -759,8 +797,14 @@ const App: React.FC = () => {
     if (!primarySelectedPart) return;
     const partKey = partNameToPoseKey[primarySelectedPart];
     
-    validateAndApplyPoseUpdate({ [partKey]: newValue }, primarySelectedPart, false);
-  }, [primarySelectedPart, validateAndApplyPoseUpdate]);
+    let tentativePose = { ...activePose, [partKey]: newValue };
+    const actualAngleDelta = newValue - ((activePose as any)[partKey] || 0);
+    if (Math.abs(actualAngleDelta) > 0.01) {
+      tentativePose = applyKineticBehaviors(tentativePose, primarySelectedPart, actualAngleDelta, jointModes);
+    }
+
+    validateAndApplyPoseUpdate(tentativePose, primarySelectedPart, false);
+  }, [primarySelectedPart, activePose, jointModes, validateAndApplyPoseUpdate]);
 
   const handleBodyRotationWheelChange = useCallback((newValue: number) => {
     validateAndApplyPoseUpdate({ bodyRotation: newValue }, null, false);

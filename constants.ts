@@ -46,7 +46,7 @@ export const RIGGING = {
   COLLAR_OFFSET_Y: ANATOMY.COLLAR * 0.15, // Small offset to balance the collar piece
 };
 
-export const FLOOR_HEIGHT = 1000 * SCALE_FACTOR;
+export const FLOOR_HEIGHT = 0;
 export const FLOOR_SINK_BUFFER = 50 * SCALE_FACTOR; // How much below floor for "slow ease" effect
 export const GROUND_SINK_REMAINING_PROPORTION = 0.45; // Proportion of the sink depth that remains when in buffer zone
 
