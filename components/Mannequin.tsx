@@ -72,11 +72,11 @@ export const getPartCategoryDisplayName = (part: PartName): string => { // Expor
 // Utility function to create common PartWrapper props
 const createPartWrapperProps = (
   part: PartName,
+  onMouseDownOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void,
+  onDoubleClickOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void,
   selectedParts: { [key in PartName]: boolean },
   jointModes: Record<PartName, JointConstraint>,
   renderMode: RenderMode,
-  onMouseDownOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void,
-  onDoubleClickOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void,
 ) => ({
   part,
   onMouseDownOnPart,
@@ -393,19 +393,22 @@ export const Mannequin: React.FC<MannequinProps> = ({
       )}
 
       {/* Render legs as separate chains */}
-      {legGraphs.map(legGraph => renderBoneNode(
-        legGraph,
-        pose,
-        offsets,
-        visibility,
-        showOverlay,
-        boneScale,
-        boneVariantOverrides,
-        selectedParts,
-        jointModes,
-        renderMode as RenderMode,
-        onMouseDownOnPart,
-        onDoubleClickOnPart
+      {legGraphs.map((legGraph, index) => React.cloneElement(
+        renderBoneNode(
+          legGraph,
+          pose,
+          offsets,
+          visibility,
+          showOverlay,
+          boneScale,
+          boneVariantOverrides,
+          selectedParts,
+          jointModes,
+          renderMode as RenderMode,
+          onMouseDownOnPart,
+          onDoubleClickOnPart
+        ),
+        { key: legGraph.part }
       ))}
 
       {/* Debug overlay - remove for production */}
