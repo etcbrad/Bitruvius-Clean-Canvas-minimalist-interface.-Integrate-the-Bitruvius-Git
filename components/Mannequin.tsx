@@ -1,15 +1,18 @@
 
-import React from 'react';
-import { Bone, type BoneProps } from './Bone'; // Import BoneProps type for explicit casting
+import React, { useMemo } from 'react';
+import { Bone, type BoneProps } from './Bone';
 import { ANATOMY, RIGGING } from '../constants';
 import { getJointPositions, getTotalRotation, calculateTensionFactor } from '../utils/kinematics';
-import { PartName, PartSelection, PartVisibility, AnchorName, Pose, JointConstraint, RenderMode, PARENT_MAP, partNameToPoseKey, PinnedState } from '../types';
-import { COLORS_BY_CATEGORY, COLORS } from './Bone'; // Import COLORS_BY_CATEGORY AND COLORS for pin indicator color
+import { PartName, PartSelection, PartVisibility, AnchorName, Pose, JointConstraint, RenderMode, PinnedState } from '../types';
+import { COLORS_BY_CATEGORY, COLORS } from './Bone';
+import { SKELETON_GRAPH, LEG_GRAPHS, OVAL_SKELETON_GRAPH, OVAL_LEG_GRAPHS, type BoneNode } from './skeleton-config';
 
 interface MannequinProps {
   pose: Pose;
   ghostPose?: Pose;
   showOverlay?: boolean;
+  showPins?: boolean;
+  modelStyle?: 'default' | 'oval';
   selectedParts: PartSelection;
   visibility: PartVisibility;
   activePins: AnchorName[];
@@ -62,18 +65,35 @@ export const getPartCategoryDisplayName = (part: PartName): string => { // Expor
   }
 };
 
+// Utility function to create common PartWrapper props
+const createPartWrapperProps = (
+  part: PartName,
+  onMouseDownOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void,
+  onDoubleClickOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void,
+  selectedParts: PartSelection,
+  jointModes: Record<PartName, JointConstraint>,
+  renderMode: RenderMode
+) => ({
+  part,
+  onMouseDownOnPart,
+  onDoubleClickOnPart,
+  selectedParts,
+  jointModes,
+  renderMode,
+});
+
 // Lifted outside component to prevent remounting on every render
 interface PartWrapperProps {
   part: PartName;
   children?: React.ReactNode;
-  onMouseDownOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void;
-  onDoubleClickOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void;
+  onMouseDownOnPart: (part: PartName, event: React.MouseEvent<SVGGElement>) => void;
+  onDoubleClickOnPart: (part: PartName, event: React.MouseEvent<SVGGElement>) => void;
   selectedParts: PartSelection;
   jointModes: Record<PartName, JointConstraint>;
   renderMode: RenderMode;
 }
 
-const PartWrapper: React.FC<PartWrapperProps> = ({ 
+const PartWrapper: React.FC<PartWrapperProps> = React.memo(({ 
   part, 
   children, 
   onMouseDownOnPart,
@@ -108,25 +128,82 @@ const PartWrapper: React.FC<PartWrapperProps> = ({
           ? React.cloneElement(child as React.ReactElement<BoneProps>, { 
               isSelected: isSelected,
               renderMode: renderMode,
-              jointConstraintMode: jointModes[part],
+              jointConstraintMode: jointModes[part] || 'fk',
             })
           : child
       )}
     </g>
   );
+});
+
+// Recursive renderer for bone nodes
+const renderBoneNode = (
+  node: BoneNode, 
+  pose: Pose, 
+  offsets: Record<PartName, import('../types').Vector2D | undefined>,
+  visibility: PartVisibility,
+  showOverlay: boolean,
+  onMouseDownOnPart: (part: PartName, event: React.MouseEvent<SVGGElement>) => void,
+  onDoubleClickOnPart: (part: PartName, event: React.MouseEvent<SVGGElement>) => void,
+  selectedParts: PartSelection,
+  jointModes: Record<PartName, JointConstraint>,
+  renderMode: RenderMode
+): React.ReactNode => {
+  const collarCounterRotate = node.attachPoint 
+    ? -getTotalRotation(PartName.Collar, pose) 
+    : 0;
+
+  const bone = (
+    <PartWrapper 
+      part={node.part} 
+      onMouseDownOnPart={onMouseDownOnPart}
+      onDoubleClickOnPart={onDoubleClickOnPart}
+      selectedParts={selectedParts}
+      jointModes={jointModes}
+      renderMode={renderMode}
+    >
+      <Bone
+        rotation={getTotalRotation(node.rotationKey, pose)}
+        {...node.boneProps}
+        offset={offsets?.[node.part]}
+        visible={visibility[node.part]}
+        showOverlay={showOverlay}
+        partCategory={getPartCategory(node.part)}
+      >
+        {node.children.map(child => renderBoneNode(
+          child, 
+          pose, 
+          offsets, 
+          visibility, 
+          showOverlay,
+          onMouseDownOnPart,
+          onDoubleClickOnPart,
+          selectedParts,
+          jointModes,
+          renderMode
+        ))}
+      </Bone>
+    </PartWrapper>
+  );
+
+  return node.attachPoint 
+    ? <g transform={`translate(${node.attachPoint.x}, ${node.attachPoint.y}) rotate(${collarCounterRotate})`}>{bone}</g>
+    : bone;
 };
 
 export const Mannequin: React.FC<MannequinProps> = ({
   pose,
   ghostPose,
   showOverlay = true,
+  showPins = true,
+  modelStyle = 'default',
   selectedParts,
   visibility,
   activePins,
   pinnedState,
   className = "text-ink",
-  onMouseDownOnPart,
-  onDoubleClickOnPart,
+  onMouseDownOnPart = () => {},
+  onDoubleClickOnPart = () => {},
   onMouseDownOnRoot,
   jointModes,
   renderMode = 'default',
@@ -134,6 +211,26 @@ export const Mannequin: React.FC<MannequinProps> = ({
   const joints = getJointPositions(pose, activePins);
   const ghostJoints = ghostPose ? getJointPositions(ghostPose, activePins) : null;
   const offsets = pose.offsets || {};
+  const skeletonGraph = modelStyle === 'oval' ? OVAL_SKELETON_GRAPH : SKELETON_GRAPH;
+  const legGraphs = modelStyle === 'oval' ? OVAL_LEG_GRAPHS : LEG_GRAPHS;
+
+  // Memoize tension calculations to prevent recalculation on every frame
+  const pinTensions = useMemo(() => 
+    activePins.map((pinName) => {
+      if (pinName === 'root') return null;
+      const currentPos = joints[pinName as keyof typeof joints];
+      const targetPos = pinnedState[pinName];
+      if (!currentPos || !targetPos) return null;
+      return {
+        pinName,
+        tension: calculateTensionFactor(currentPos, targetPos),
+        currentPos,
+        targetPos
+      };
+    }).filter(Boolean),
+    [joints, activePins, pinnedState]
+  );
+
   const ROOT_COLOR = "#5A5A5A"; // Darker grayscale for the root circle
   const PIN_INDICATOR_SIZE = ANATOMY.ROOT_SIZE * 0.7; // Size of the inner circle of the root graphic
   const PIN_INDICATOR_STROKE_COLOR = COLORS.SELECTION; // Light monochrome for stroke
@@ -369,89 +466,125 @@ export const Mannequin: React.FC<MannequinProps> = ({
   };
 
   return (
-    <g className={`mannequin-container ${className}`}>
-      {/* Render Ghost Skeleton First (Behind) */}
-      {ghostPose && ghostJoints && renderSkeleton(ghostPose, ghostJoints, true)}
-      
-      {/* Render Main Skeleton */}
-      {renderSkeleton(pose, joints, false)}
+    // The `pose.root.x` and `pose.root.y` used here are already compensated by getJointPositions
+    <g 
+      className={`mannequin-root ${className}`} 
+      transform={`translate(${joints.root.x}, ${joints.root.y}) rotate(${pose.bodyRotation})`}
+      aria-label="Mannequin figure"
+    >
+      {showPins && (
+        <React.Fragment>
+          {/* Root circle for drag */}
+          <g 
+            onMouseDown={onMouseDownOnRoot} 
+            className={'cursor-pointer'} 
+            data-no-export={true}
+            role="button"
+            aria-label="Drag mannequin root"
+          >
+            <circle cx="0" cy="0" r={ANATOMY.ROOT_SIZE} fill="currentColor" opacity="0.1" />
+            <circle 
+              cx="0" cy="0" r={PIN_INDICATOR_SIZE} 
+              fill={activePins.includes('root') ? COLORS.ANCHOR_RED : ROOT_COLOR}
+              stroke={PIN_INDICATOR_STROKE_COLOR} 
+              strokeWidth={PIN_INDICATOR_STROKE_WIDTH} 
+            />
+          </g>
 
-      {/* Root circle for drag (Always on top of main skeleton) */}
-      <g 
-        onMouseDown={onMouseDownOnRoot} 
-        className={'cursor-pointer'} 
-        transform={`translate(${joints.root.x}, ${joints.root.y}) rotate(${pose.bodyRotation})`}
-        data-no-export={true}
-        role="button"
-        aria-label="Drag mannequin root"
-      >
-        <circle cx="0" cy="0" r={ANATOMY.ROOT_SIZE} fill="currentColor" opacity="0.1" />
-        <circle 
-          cx="0" cy="0" r={PIN_INDICATOR_SIZE} 
-          fill={activePins.includes('root') ? COLORS.ANCHOR_RED : ROOT_COLOR}
-          stroke={PIN_INDICATOR_STROKE_COLOR} 
-          strokeWidth={PIN_INDICATOR_STROKE_WIDTH} 
-        />
-      </g>
+          {/* Multi-Pin Indicators with Tension Visualization */}
+          {pinTensions.map((pinData, index) => {
+            if (!pinData) return null;
+            const { pinName, tension, currentPos, targetPos } = pinData;
+            const isPrimary = index === 0;
+            
+            // Tension visual: Scale and luminance
+            const scale = 1 + tension * 0.5;
+            const opacity = 0.5 + tension * 0.5;
+            const color = isPrimary ? COLORS.ANCHOR_RED : "#FF4488"; // Pinkish-red for secondary pins
 
-      {/* Multi-Pin Indicators with Tension Visualization */}
-      <g transform={`translate(${joints.root.x}, ${joints.root.y}) rotate(${pose.bodyRotation})`}>
-        {activePins.map((pinName, index) => {
-          if (pinName === 'root') return null;
-          const currentPos = joints[pinName as keyof typeof joints];
-          const targetPos = pinnedState[pinName];
-          if (!currentPos || !targetPos) return null;
+            return (
+              <g 
+                key={pinName}
+                transform={`translate(${currentPos.x - pose.root.x}, ${currentPos.y - pose.root.y})`} 
+                data-no-export={true}
+              >
+                {/* Rubber band line if tension exists */}
+                {tension > 0.05 && (
+                  <line 
+                    x1={0} y1={0} 
+                    x2={targetPos.x - currentPos.x} 
+                    y2={targetPos.y - currentPos.y}
+                    stroke={color}
+                    strokeWidth={2}
+                    strokeDasharray="2,2"
+                    opacity={opacity}
+                  />
+                )}
+                
+                {/* Target pin (ghost) */}
+                <circle 
+                  cx={targetPos.x - currentPos.x} 
+                  cy={targetPos.y - currentPos.y} 
+                  r={PIN_INDICATOR_SIZE * 0.5} 
+                  fill={color} 
+                  opacity={0.3} 
+                />
 
-          const tension = calculateTensionFactor(currentPos, targetPos);
-          const isPrimary = index === 0;
-          
-          // Tension visual: Scale and luminance
-          const scale = 1 + tension * 0.5;
-          const opacity = 0.5 + tension * 0.5;
-          const color = isPrimary ? COLORS.ANCHOR_RED : "#FF4488"; // Pinkish-red for secondary pins
-
-          return (
-            <g 
-              key={pinName}
-              transform={`translate(${currentPos.x - joints.root.x}, ${currentPos.y - joints.root.y})`} 
-              data-no-export={true}
-            >
-              {/* Rubber band line if tension exists */}
-              {tension > 0.05 && (
-                <line 
-                  x1={0} y1={0} 
-                  x2={targetPos.x - currentPos.x} 
-                  y2={targetPos.y - currentPos.y}
-                  stroke={color}
-                  strokeWidth={2}
-                  strokeDasharray="2,2"
+                {/* Active joint pin */}
+                <circle cx="0" cy="0" r={ANATOMY.ROOT_SIZE} fill="currentColor" opacity="0.1" />
+                <circle 
+                  cx="0" cy="0" r={PIN_INDICATOR_SIZE * scale} 
+                  fill={color}
+                  stroke={PIN_INDICATOR_STROKE_COLOR} 
+                  strokeWidth={PIN_INDICATOR_STROKE_WIDTH}
                   opacity={opacity}
                 />
-              )}
-              
-              {/* Target pin (ghost) */}
-              <circle 
-                cx={targetPos.x - currentPos.x} 
-                cy={targetPos.y - currentPos.y} 
-                r={PIN_INDICATOR_SIZE * 0.5} 
-                fill={color} 
-                opacity={0.3} 
-              />
+              </g>
+            );
+          })}
+        </React.Fragment>
+      )}
 
-              {/* Active joint pin */}
-              <circle cx="0" cy="0" r={ANATOMY.ROOT_SIZE} fill="currentColor" opacity="0.1" />
-              <circle 
-                cx="0" cy="0" r={PIN_INDICATOR_SIZE * scale} 
-                fill={color}
-                stroke={PIN_INDICATOR_STROKE_COLOR} 
-                strokeWidth={PIN_INDICATOR_STROKE_WIDTH}
-                opacity={opacity}
-              />
-            </g>
-          );
-        })}
-      </g>
-      </g>
+      {/* Data-driven skeleton rendering */}
+      {renderBoneNode(
+        skeletonGraph, 
+        pose, 
+        offsets, 
+        visibility, 
+        showOverlay,
+        onMouseDownOnPart,
+        onDoubleClickOnPart,
+        selectedParts,
+        jointModes,
+        renderMode as RenderMode
+      )}
+
+      {/* Render legs as separate chains */}
+      {legGraphs.map(legGraph => renderBoneNode(
+        legGraph,
+        pose, 
+        offsets, 
+        visibility, 
+        showOverlay,
+        onMouseDownOnPart,
+        onDoubleClickOnPart,
+        selectedParts,
+        jointModes,
+        renderMode as RenderMode
+      ))}
+
+      {/* Debug overlay - remove for production */}
+      {process.env.NODE_ENV === 'development' && Object.entries(joints).map(([name, pos]) => (
+        <circle 
+          key={name} 
+          cx={pos.x - joints.root.x} 
+          cy={pos.y - joints.root.y} 
+          r={3} 
+          fill="lime" 
+          opacity={0.8} 
+          className="pointer-events-none" 
+        />
+      ))}
     </g>
   );
 };

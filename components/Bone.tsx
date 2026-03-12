@@ -9,7 +9,7 @@ export interface BoneProps { // Exported for use in Mannequin.tsx cloneElement
   rotation: number;
   length: number;
   width?: number;
-  variant?: 'diamond' | 'waist-teardrop-pointy-up' | 'torso-teardrop-pointy-down' | 'collar-horizontal-oval-shape' | 'deltoid-shape' | 'limb-tapered' | 'head-tall-oval' | 'hand-foot-arrowhead-shape';
+  variant?: 'diamond' | 'waist-teardrop-pointy-up' | 'torso-teardrop-pointy-down' | 'collar-horizontal-oval-shape' | 'deltoid-shape' | 'limb-tapered' | 'head-tall-oval' | 'hand-foot-arrowhead-shape' | 'oval-limb' | 'oval-torso' | 'oval-waist' | 'oval-hand-foot';
   showOverlay?: boolean;
   visible?: boolean;
   offset?: Vector2D;
@@ -71,6 +71,13 @@ const getPartCategoryColor = (category?: string) => {
 const getBonePath = (length: number, width: number, variant: string, drawsUpwards: boolean): string => {
   const effectiveLength = drawsUpwards ? -length : length;
   const halfWidth = width / 2;
+  const capsulePath = (endY: number, w: number) => {
+    const radius = w / 2;
+    const cap = Math.min(Math.abs(endY), radius);
+    const dir = endY >= 0 ? 1 : -1;
+    const tipY = endY - dir * cap;
+    return `M ${-radius},0 A ${radius} ${radius} 0 0 1 ${radius} 0 L ${radius} ${tipY} A ${radius} ${radius} 0 0 1 ${-radius} ${tipY} Z`;
+  };
 
   switch (variant) {
     case 'head-tall-oval':
@@ -113,6 +120,18 @@ const getBonePath = (length: number, width: number, variant: string, drawsUpward
       const hMaxWidth = width;
       const flareY = effectiveLength * 0.2; 
       return `M ${-hBaseWidth / 2},0 L ${hBaseWidth / 2},0 L ${hMaxWidth / 2},${flareY} L 0,${effectiveLength} L ${-hMaxWidth / 2},${flareY} Z`;
+
+    case 'oval-limb':
+      return capsulePath(effectiveLength, width * 0.85);
+
+    case 'oval-torso':
+      return capsulePath(effectiveLength, width * 1.1);
+
+    case 'oval-waist':
+      return capsulePath(effectiveLength, width * 1.05);
+
+    case 'oval-hand-foot':
+      return capsulePath(effectiveLength, width);
 
     default:
       const split = effectiveLength * 0.4;

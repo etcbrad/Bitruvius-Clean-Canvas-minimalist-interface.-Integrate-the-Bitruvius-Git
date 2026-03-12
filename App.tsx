@@ -2,7 +2,7 @@
 import React, { useState, useRef, useMemo, useCallback, useEffect } from 'react';
 import { Pose, PartName, PartSelection, PartVisibility, AnchorName, partNameToPoseKey, JointConstraint, RenderMode, Vector2D, ViewMode, AnimationState, AnimationKeyframe, SavedPose, KinematicMode } from './types';
 import { RESET_POSE, FLOOR_HEIGHT, JOINT_LIMITS, ANATOMY, GROUND_STRIP_HEIGHT } from './constants'; 
-import { getJointPositions, getShortestAngleDiffDeg, interpolatePoses, solveIK, solveAdvancedIK } from './utils/kinematics';
+import { getJointPositions, getShortestAngleDiffDeg, interpolatePoses, solveIK, solveAdvancedIK, solveFABRIK, solveJacobianTranspose, solvePIM2, solveDLS, solveFluid } from './utils/kinematics';
 import { Scanlines, SystemGuides } from './components/SystemGrid';
 import { Mannequin, getPartCategory, getPartCategoryDisplayName } from './components/Mannequin'; 
 import { DraggablePanel } from './components/DraggablePanel';
@@ -10,6 +10,9 @@ import { COLORS_BY_CATEGORY, COLORS } from './components/Bone';
 import { poseToString, stringToPose } from './utils/pose-parser';
 import { RotationWheelControl } from './components/RotationWheelControl';
 import { POSE_LIBRARY_DB } from './pose-library-db';
+import { useSequence } from './hooks/useSequence';
+import { EnhancedTimeline } from './components/EnhancedTimeline';
+import { MovementSettings } from './components/MovementSettings';
 
 interface PanelRect {
   id: string;
@@ -63,90 +66,64 @@ const App: React.FC = () => {
     Object.values(PartName).reduce((acc, name) => ({ ...acc, [name]: 'fk' }), {} as Record<PartName, JointConstraint>)
   );
 
-  // Animation State
-  const [animation, setAnimation] = useState<AnimationState>({
-    keyframes: [],
-    isPlaying: false,
-    currentFrameIndex: 0,
-    loop: true,
-  });
+  // New Sequence Engine with Auto-Interpolation (defaults to ON)
+  const [sequence, sequencePose, sequenceActions] = useSequence(activePose, { autoInterpolationEnabled: autoInterpolation });
+  const [autoInterpolation, setAutoInterpolation] = useState(true);
+  const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+  const [viewingPose, setViewingPose] = useState<Pose | null>(null);
 
   const [kinematicMode, setKinematicMode] = useState<KinematicMode>('fk');
   const [isPoweredOn, setIsPoweredOn] = useState(true);
+  const [isUserInteracting, setIsUserInteracting] = useState(false);
 
-  const animationTimer = useRef<number | null>(null);
+  // Update activePose with sequencePose when sequence is playing or scrubbing
+  useEffect(() => {
+    if ((sequence.isPlaying || sequence.scrubPosition > 0) && !isUserInteracting) {
+      setActivePose(sequencePose);
+    }
+  }, [sequencePose, sequence.isPlaying, sequence.scrubPosition, isUserInteracting]);
 
-  // --- Animation Logic ---
+  // --- Sequence Actions ---
   const addKeyframe = useCallback(() => {
-    const newKeyframe: AnimationKeyframe = {
-      id: Math.random().toString(36).substr(2, 9),
-      pose: { ...activePose },
-      duration: 1000,
-    };
-    setAnimation(prev => ({
-      ...prev,
-      keyframes: [...prev.keyframes, newKeyframe],
-    }));
-  }, [activePose]);
+    sequenceActions.addSlot(activePose);
+  }, [activePose, sequenceActions]);
 
   const removeKeyframe = useCallback((id: string) => {
-    setAnimation(prev => ({
-      ...prev,
-      keyframes: prev.keyframes.filter(k => k.id !== id),
-    }));
-  }, []);
+    sequenceActions.removeSlot(id);
+  }, [sequenceActions]);
 
   const playAnimation = useCallback(() => {
-    if (animation.keyframes.length < 2) return;
-    setAnimation(prev => ({ ...prev, isPlaying: true, currentFrameIndex: 0 }));
-  }, [animation.keyframes.length]);
+    sequenceActions.play();
+  }, [sequenceActions]);
 
   const stopAnimation = useCallback(() => {
-    setAnimation(prev => ({ ...prev, isPlaying: false }));
-    if (animationTimer.current) cancelAnimationFrame(animationTimer.current);
+    sequenceActions.stop();
+  }, [sequenceActions]);
+
+  // --- Pose Editing Actions ---
+  const handleSlotClick = useCallback((slotId: string) => {
+    setSelectedSlotId(slotId);
+    const slot = sequence.slots.find(s => s.id === slotId);
+    if (slot) {
+      setViewingPose(slot.pose);
+    }
+  }, [sequence.slots]);
+
+  const updateSlotFromCurrent = useCallback((slotId: string) => {
+    sequenceActions.updateSlot(slotId, activePose);
+  }, [activePose, sequenceActions]);
+
+  const exitPoseView = useCallback(() => {
+    setViewingPose(null);
+    setSelectedSlotId(null);
   }, []);
 
-  useEffect(() => {
-    if (animation.isPlaying && animation.keyframes.length >= 2) {
-      const currentK = animation.keyframes[animation.currentFrameIndex];
-      const nextIndex = (animation.currentFrameIndex + 1) % animation.keyframes.length;
-      const nextK = animation.keyframes[nextIndex];
-
-      if (nextIndex === 0 && !animation.loop) {
-        stopAnimation();
-        return;
-      }
-
-      let startTime = Date.now();
-      const duration = nextK.duration;
-
-      const animate = () => {
-        const elapsed = Date.now() - startTime;
-        const t = Math.min(1, elapsed / duration);
-        
-        // Exponential decay / smooth interpolation
-        const easedT = 1 - Math.pow(1 - t, 3); 
-        
-        const interpolated = interpolatePoses(currentK.pose, nextK.pose, easedT);
-        setActivePose(interpolated);
-
-        if (t < 1) {
-          animationTimer.current = requestAnimationFrame(animate);
-        } else {
-          setAnimation(prev => ({ ...prev, currentFrameIndex: nextIndex }));
-        }
-      };
-
-      animate();
-    }
-    return () => {
-      if (animationTimer.current) cancelAnimationFrame(animationTimer.current);
-    };
-  }, [animation.isPlaying, animation.currentFrameIndex, animation.keyframes, animation.loop, stopAnimation]);
-
-  // --- IK Interaction Logic ---
+  // --- IK Interaction Logic with Smooth Motion ---
   const handleIKMove = useCallback((pinName: AnchorName, targetPos: Vector2D) => {
     if (pinName === 'root' || pinName === PartName.Waist) return;
+
+    // Set interaction flag to prevent sequence updates during user manipulation
+    setIsUserInteracting(true);
 
     // Determine which limb we are dragging
     let limb: 'rArm' | 'lArm' | 'rLeg' | 'lLeg' | null = null;
@@ -157,14 +134,27 @@ const App: React.FC = () => {
 
     if (limb) {
       let solvedPose: Pose;
-      if (kinematicMode === 'ik') {
-        solvedPose = solveIK(ghostPose, limb, targetPos);
+
+      if (kinematicMode === 'fk') {
+        solvedPose = activePose;
+      } else if (kinematicMode === 'ik') {
+        solvedPose = solveIK(activePose, limb, targetPos, 10);
+      } else if (kinematicMode === 'fabrik') {
+        solvedPose = solveFABRIK(activePose, limb, targetPos, jointModes, activePins);
+      } else if (kinematicMode === 'jacobian') {
+        solvedPose = solveJacobianTranspose(activePose, limb, targetPos, jointModes, activePins);
+      } else if (kinematicMode === 'pim2') {
+        solvedPose = solvePIM2(activePose, limb, targetPos, jointModes, activePins);
+      } else if (kinematicMode === 'dls') {
+        solvedPose = solveDLS(activePose, limb, targetPos, jointModes, activePins);
+      } else if (kinematicMode === 'fluid') {
+        solvedPose = solveFluid(activePose, limb, targetPos, jointModes, activePins);
       } else {
-        solvedPose = solveAdvancedIK(ghostPose, limb, targetPos, jointModes, activePins);
+        solvedPose = solveFABRIK(activePose, limb, targetPos, jointModes, activePins);
       }
       setGhostPose(solvedPose);
     }
-  }, [ghostPose, jointModes, activePins, kinematicMode]);
+  }, [activePose, jointModes, activePins, kinematicMode]);
 
   const [userPoses, setUserPoses] = useState<SavedPose[]>(() => {
     const saved = localStorage.getItem('bitruvius-saved-poses');
@@ -214,6 +204,16 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
 
   const [showSplash, setShowSplash] = useState(true);
   const [isAirMode] = useState(false);
+  const [showPins, setShowPins] = useState(true);
+  const [showBoneOverlay, setShowBoneOverlay] = useState(true);
+  const [mannequinStyle, setMannequinStyle] = useState<'default' | 'oval'>('default');
+  const [walkingEnabled, setWalkingEnabled] = useState(false);
+  const [walkingPinMode, setWalkingPinMode] = useState<'none' | 'leftFoot' | 'rightFoot' | 'dual'>('none');
+  const [gaitDepth, setGaitDepth] = useState(35);
+  const [smartPinning, setSmartPinning] = useState(false);
+  const [bodySyncMode, setBodySyncMode] = useState(false);
+  const [omniSyncMode, setOmniSyncMode] = useState(false);
+  const [systemLogs, setSystemLogs] = useState<{ timestamp: string; message: string }[]>([]);
 
   const [windowSize, setWindowSize] = useState({
     innerWidth: window.innerWidth,
@@ -222,7 +222,11 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
 
   // Panel Z-index management for the single settings panel
   const [panelZIndices, setPanelZIndices] = useState<Record<string, number>>({
-    'model-settings-panel': 102,
+    'model-settings-panel': 101,
+    'movement-settings-panel': 102,
+    'system-status-panel': 100,
+    'command-log-panel': 99,
+    'pose-data-terminal-panel': 98,
   });
   const nextZIndex = useRef<number>(103);
 
@@ -234,9 +238,13 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
     });
   }, []);
 
-  // --- Panel Position/Size Management for the single settings panel ---
+  // --- Panel Position/Size Management for the settings panels ---
   const [panelRects, setPanelRects] = useState<Record<string, PanelRect>>({
     'model-settings-panel': { id: 'model-settings-panel', x: window.innerWidth - 224 - 16, y: 64, width: 224, height: 700, minimized: true },
+    'movement-settings-panel': { id: 'movement-settings-panel', x: window.innerWidth - 224 - 16, y: 400, width: 224, height: 600, minimized: true },
+    'system-status-panel': { id: 'system-status-panel', x: 16, y: 64, width: 224, height: 220, minimized: false },
+    'command-log-panel': { id: 'command-log-panel', x: 16, y: 300, width: 224, height: 240, minimized: false },
+    'pose-data-terminal-panel': { id: 'pose-data-terminal-panel', x: 16, y: 556, width: 224, height: 220, minimized: false },
   });
 
   const updatePanelRect = useCallback((id: string, newRect: Omit<PanelRect, 'x' | 'y'>) => {
@@ -277,6 +285,14 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
   };
 
   // --- End Panel Position/Size Management ---
+  const addLog = useCallback((message: string) => {
+    const timestamp = new Date().toLocaleTimeString();
+    setSystemLogs(prev => [...prev.slice(-49), { timestamp, message }]);
+  }, []);
+
+  useEffect(() => {
+    addLog('[SYSTEM]: BOOT SEQUENCE COMPLETE');
+  }, [addLog]);
 
   const primarySelectedPart = useMemo(() => {
     return (Object.entries(selectedParts).find(([p, sel]) => sel)?.[0]) as PartName | undefined;
@@ -385,6 +401,36 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
   ) => {
       setGhostPose(prev => {
           let tentativeNextPose: Pose = { ...prev, ...proposedUpdates };
+
+          if (bodySyncMode && partBeingDirectlyManipulated) {
+            const oppositeMap: Record<string, string> = {
+              'lShoulder': 'rShoulder', 'rShoulder': 'lShoulder',
+              'lForearm': 'rForearm', 'rForearm': 'lForearm',
+              'lWrist': 'rWrist', 'rWrist': 'lWrist',
+              'lThigh': 'rThigh', 'rThigh': 'lThigh',
+              'lCalf': 'rCalf', 'rCalf': 'lCalf',
+              'lAnkle': 'rAnkle', 'rAnkle': 'lAnkle',
+            };
+            const directKey = partNameToPoseKey[partBeingDirectlyManipulated];
+            const oppositeKey = oppositeMap[directKey];
+            if (oppositeKey) {
+              const delta = ((proposedUpdates as any)[directKey] || 0) - ((prev as any)[directKey] || 0);
+              (tentativeNextPose as any)[oppositeKey] = ((prev as any)[oppositeKey] || 0) - delta;
+            }
+          }
+
+          if (omniSyncMode) {
+            const rotationKeys = new Set<string>([...Object.values(partNameToPoseKey), 'bodyRotation']);
+            Object.keys(proposedUpdates).forEach(key => {
+              if (!rotationKeys.has(key)) return;
+              const delta = ((proposedUpdates as any)[key] || 0) - ((prev as any)[key] || 0);
+              if (Math.abs(delta) < 0.01) return;
+              rotationKeys.forEach(otherKey => {
+                if (otherKey === key) return;
+                (tentativeNextPose as any)[otherKey] = ((tentativeNextPose as any)[otherKey] || (prev as any)[otherKey] || 0) + delta * 0.08;
+              });
+            });
+          }
 
           if (!isValidMove(
               tentativeNextPose,
@@ -518,6 +564,7 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
     setEffectorPart(null); 
     setIsEffectorDragging(false); 
     setIsIKDragging(false);
+    setIsUserInteracting(false); // Reset interaction flag
     rotationStartInfo.current = null;
     dragStartInfo.current = dragStartInfoInitial(); 
   }, [ghostPose, activePose]);
@@ -544,10 +591,32 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
     updatePinnedState(activePins);
   }, [activePins]); // Sync pinnedState when activePins change
 
+  useEffect(() => {
+    if (!walkingEnabled) return;
+    if (walkingPinMode === 'none') {
+      setActivePins([PartName.Waist]);
+      return;
+    }
+    if (walkingPinMode === 'leftFoot') {
+      setActivePins([PartName.Waist, PartName.LAnkle, 'lFootTip']);
+      return;
+    }
+    if (walkingPinMode === 'rightFoot') {
+      setActivePins([PartName.Waist, PartName.RAnkle, 'rFootTip']);
+      return;
+    }
+    setActivePins([PartName.Waist, PartName.LAnkle, 'lFootTip', PartName.RAnkle, 'rFootTip']);
+  }, [walkingEnabled, walkingPinMode]);
+
   const handleMouseDownOnPart = useCallback((part: PartName, e: React.MouseEvent<SVGGElement>) => {
     e.stopPropagation();
     if (!svgRef.current) return;
-
+    if (smartPinning) {
+      if (part === PartName.LAnkle) setActivePins([PartName.Waist, PartName.LAnkle, 'lFootTip']);
+      else if (part === PartName.RAnkle) setActivePins([PartName.Waist, PartName.RAnkle, 'rFootTip']);
+      else if (part === PartName.LWrist) setActivePins([PartName.Waist, PartName.LWrist, 'lHandTip']);
+      else if (part === PartName.RWrist) setActivePins([PartName.Waist, PartName.RWrist, 'rHandTip']);
+    }
     isDragging.current = true;
     dragStartPose.current = activePose;
     setSelectedParts(prev => {
@@ -582,15 +651,22 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
         pointerX: transformedPoint.x, pointerY: transformedPoint.y, initialPinnedPos: null // Not used in Bitruvius 0.2
       };
     }
-  }, [activePose, activePins, kinematicMode, jointModes]);
+  }, [activePose, activePins, kinematicMode, jointModes, smartPinning]);
 
   const cycleKinematicMode = useCallback(() => {
     setKinematicMode(prev => {
-      if (prev === 'fk') return 'ik';
-      if (prev === 'ik') return 'fabrik';
-      return 'fk';
+      let next: KinematicMode;
+      if (prev === 'fk') next = 'ik';
+      else if (prev === 'ik') next = 'fabrik';
+      else if (prev === 'fabrik') next = 'jacobian';
+      else if (prev === 'jacobian') next = 'pim2';
+      else if (prev === 'pim2') next = 'dls';
+      else if (prev === 'dls') next = 'fluid';
+      else next = 'fk';
+      addLog(`[SYSTEM]: KINEMATIC MODE -> ${next.toUpperCase()}`);
+      return next;
     });
-  }, []);
+  }, [addLog]);
   const cycleRenderMode = useCallback(() => {
     setRenderMode(prev => {
       if (prev === 'default') return 'wireframe';
@@ -612,7 +688,7 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
     });
   }, []);
 
-  // Handler for toggling the minimized state of the settings panel
+  // Handler for toggling the minimized state of the settings panels
   const toggleSettingsPanelMinimized = useCallback(() => {
     setPanelRects(prev => {
       const currentPanel = prev['model-settings-panel'];
@@ -622,6 +698,50 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
       };
     });
     bringPanelToFront('model-settings-panel'); // Bring to front when toggled
+  }, [bringPanelToFront]);
+
+  const toggleMovementPanelMinimized = useCallback(() => {
+    setPanelRects(prev => {
+      const currentPanel = prev['movement-settings-panel'];
+      return {
+        ...prev,
+        'movement-settings-panel': { ...currentPanel, minimized: !currentPanel.minimized }
+      };
+    });
+    bringPanelToFront('movement-settings-panel');
+  }, [bringPanelToFront]);
+
+  const toggleSystemStatusPanelMinimized = useCallback(() => {
+    setPanelRects(prev => {
+      const currentPanel = prev['system-status-panel'];
+      return {
+        ...prev,
+        'system-status-panel': { ...currentPanel, minimized: !currentPanel.minimized }
+      };
+    });
+    bringPanelToFront('system-status-panel');
+  }, [bringPanelToFront]);
+
+  const toggleCommandLogPanelMinimized = useCallback(() => {
+    setPanelRects(prev => {
+      const currentPanel = prev['command-log-panel'];
+      return {
+        ...prev,
+        'command-log-panel': { ...currentPanel, minimized: !currentPanel.minimized }
+      };
+    });
+    bringPanelToFront('command-log-panel');
+  }, [bringPanelToFront]);
+
+  const togglePoseDataPanelMinimized = useCallback(() => {
+    setPanelRects(prev => {
+      const currentPanel = prev['pose-data-terminal-panel'];
+      return {
+        ...prev,
+        'pose-data-terminal-panel': { ...currentPanel, minimized: !currentPanel.minimized }
+      };
+    });
+    bringPanelToFront('pose-data-terminal-panel');
   }, [bringPanelToFront]);
 
   useEffect(() => {
@@ -663,10 +783,20 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
       });
       // Adjust panel position on resize if it would go off-screen
       setPanelRects(prev => {
-        const panel = prev['model-settings-panel'];
-        const newX = Math.min(panel.x, window.innerWidth - panel.width - 16);
-        const newY = Math.min(panel.y, window.innerHeight - (panel.minimized ? 40 : panel.height) - 16); // 40px is rough minimized height
-        return { ...prev, 'model-settings-panel': { ...panel, x: Math.max(0, newX), y: Math.max(0, newY) } };
+        const modelPanel = prev['model-settings-panel'];
+        const movementPanel = prev['movement-settings-panel'];
+        
+        const newModelX = Math.min(modelPanel.x, window.innerWidth - modelPanel.width - 16);
+        const newModelY = Math.min(modelPanel.y, window.innerHeight - (modelPanel.minimized ? 40 : modelPanel.height) - 16);
+        
+        const newMovementX = Math.min(movementPanel.x, window.innerWidth - movementPanel.width - 16);
+        const newMovementY = Math.min(movementPanel.y, window.innerHeight - (movementPanel.minimized ? 40 : movementPanel.height) - 16);
+        
+        return {
+          ...prev,
+          'model-settings-panel': { ...modelPanel, x: newModelX, y: newModelY },
+          'movement-settings-panel': { ...movementPanel, x: newMovementX, y: newMovementY }
+        };
       });
     };
 
@@ -739,6 +869,10 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
 
   const allPanelRectsArray = useMemo(() => Object.values(panelRects), [panelRects]);
   const settingsPanel = panelRects['model-settings-panel'];
+  const movementPanel = panelRects['movement-settings-panel'];
+  const systemStatusPanel = panelRects['system-status-panel'];
+  const commandLogPanel = panelRects['command-log-panel'];
+  const poseDataPanel = panelRects['pose-data-terminal-panel'];
 
   return (
     <div className={`w-full h-full bg-mono-darker shadow-2xl flex flex-col relative touch-none fixed inset-0 z-50 overflow-hidden text-ink font-mono ${!isPoweredOn ? 'grayscale brightness-50' : ''}`}>
@@ -754,44 +888,99 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
           </div>
         </div>
 
-        {/* Top Right: Consolidated Controls */}
-        <div className="absolute top-4 right-4 z-[1000] flex items-center gap-2 bg-black/20 backdrop-blur-sm p-1 border border-white/10 rounded-full">
-          {/* Kinematic Mode Toggle */}
+        {/* Top Bar: Panel Launchers + Quick Toggles */}
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[1000] flex items-center gap-2 bg-black/30 backdrop-blur-sm px-2 py-1 border border-white/10 rounded-full">
+          <div className="flex items-center gap-1">
+            <button
+              onClick={toggleSettingsPanelMinimized}
+              className={`px-2 py-1 text-[9px] font-bold rounded-full border transition-all ${
+                !settingsPanel.minimized ? 'bg-selection/20 border-selection text-selection' : 'bg-white/10 border-white/20 text-white/60 hover:bg-white/20'
+              }`}
+            >
+              MODEL
+            </button>
+            <button
+              onClick={toggleMovementPanelMinimized}
+              className={`px-2 py-1 text-[9px] font-bold rounded-full border transition-all ${
+                !movementPanel.minimized ? 'bg-accent-purple/20 border-accent-purple text-accent-purple' : 'bg-white/10 border-white/20 text-white/60 hover:bg-white/20'
+              }`}
+            >
+              MOVE
+            </button>
+            <button
+              onClick={toggleSystemStatusPanelMinimized}
+              className={`px-2 py-1 text-[9px] font-bold rounded-full border transition-all ${
+                !systemStatusPanel.minimized ? 'bg-accent-green/20 border-accent-green text-accent-green' : 'bg-white/10 border-white/20 text-white/60 hover:bg-white/20'
+              }`}
+            >
+              SYS
+            </button>
+            <button
+              onClick={toggleCommandLogPanelMinimized}
+              className={`px-2 py-1 text-[9px] font-bold rounded-full border transition-all ${
+                !commandLogPanel.minimized ? 'bg-accent-blue/20 border-accent-blue text-accent-blue' : 'bg-white/10 border-white/20 text-white/60 hover:bg-white/20'
+              }`}
+            >
+              LOG
+            </button>
+            <button
+              onClick={togglePoseDataPanelMinimized}
+              className={`px-2 py-1 text-[9px] font-bold rounded-full border transition-all ${
+                !poseDataPanel.minimized ? 'bg-accent-orange/20 border-accent-orange text-accent-orange' : 'bg-white/10 border-white/20 text-white/60 hover:bg-white/20'
+              }`}
+            >
+              POSE
+            </button>
+          </div>
+
+          <div className="w-px h-4 bg-white/10 mx-1" />
+
           <button
             onClick={cycleKinematicMode}
-            className={`px-3 py-2 rounded-full border transition-all duration-300 flex items-center gap-2 ${
-              kinematicMode !== 'fk' 
-              ? 'bg-accent-purple/30 border-accent-purple text-white shadow-[0_0_10px_rgba(168,85,247,0.3)]' 
-              : 'bg-white/10 border-white/20 text-white/70 hover:bg-white/20'
+            className={`px-2 py-1 rounded-full border transition-all duration-200 text-[9px] font-bold ${
+              kinematicMode !== 'fk'
+                ? 'bg-accent-purple/30 border-accent-purple text-white'
+                : 'bg-white/10 border-white/20 text-white/60 hover:bg-white/20'
             }`}
             aria-label={`Kinematic Mode: ${kinematicMode.toUpperCase()}`}
           >
-            <span className="text-[10px] font-bold tracking-tighter">{kinematicMode.toUpperCase()}</span>
+            {kinematicMode.toUpperCase()}
           </button>
 
-          {/* Power/Activation Button */}
           <button
-            onClick={() => setIsPoweredOn(!isPoweredOn)}
-            className={`p-2 rounded-full border transition-all duration-300 ${
-              isPoweredOn 
-              ? 'bg-accent-green/30 border-accent-green text-accent-green shadow-[0_0_15px_rgba(34,197,94,0.4)]' 
-              : 'bg-accent-red/30 border-accent-red text-accent-red opacity-50'
+            onClick={() => setShowPins(!showPins)}
+            className={`px-2 py-1 rounded-full border transition-all text-[9px] font-bold ${
+              showPins ? 'bg-selection/20 border-selection text-selection' : 'bg-white/10 border-white/20 text-white/60 hover:bg-white/20'
+            }`}
+          >
+            PINS
+          </button>
+          <button
+            onClick={() => setShowBoneOverlay(!showBoneOverlay)}
+            className={`px-2 py-1 rounded-full border transition-all text-[9px] font-bold ${
+              showBoneOverlay ? 'bg-selection/20 border-selection text-selection' : 'bg-white/10 border-white/20 text-white/60 hover:bg-white/20'
+            }`}
+          >
+            AXIS
+          </button>
+
+          <button
+            onClick={() => {
+              setIsPoweredOn(prev => {
+                const next = !prev;
+                addLog(`[SYSTEM]: POWER ${next ? 'ON' : 'OFF'}`);
+                return next;
+              });
+            }}
+            className={`p-2 rounded-full border transition-all duration-200 ${
+              isPoweredOn
+                ? 'bg-accent-green/30 border-accent-green text-accent-green'
+                : 'bg-accent-red/30 border-accent-red text-accent-red opacity-60'
             }`}
             aria-label={isPoweredOn ? "System Shutdown" : "System Activation"}
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
-          </button>
-
-          {/* Settings Toggle Button */}
-          <button
-            onClick={toggleSettingsPanelMinimized}
-            className={`p-2 bg-white/10 hover:bg-white/20 rounded-full border border-white/20 text-white hover:text-focus-ring transition-all duration-200 ${!settingsPanel.minimized ? 'border-selection text-selection bg-selection/20' : ''}`}
-            aria-label={settingsPanel.minimized ? "Open Model Settings" : "Close Model Settings"}
-          >
-            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-              <path d="M17.243 14.757l-.37-.37c-.63.63-1.39 1.05-2.22 1.25l-.23.95a.996.996 0 01-1.22.75l-2-.5a.996.996 0 01-.75-1.22l.23-.95c-.83-.2-1.59-.62-2.22-1.25l-.37.37a.997.997 0 01-1.41 0l-.707-.707a.997.997 0 010-1.414l.37-.37c-.63-.63-1.05-1.39-1.25-2.22l-.95-.23a.996.996 0 01-.75-1.22l.5-2a.996.996 0 011.22-.75l.95.23c.2-.83.62-1.59 1.25-2.22l-.37-.37a.997.997 0 010-1.414l.707-.707a.997.997 0 011.414 0l.37.37c.63-.63 1.39-1.05 2.22-1.25l.23-.95a.996.996 0 011.22-.75l2 .5a.996.996 0 01.75 1.22l-.23.95c.83.2 1.59.62 2.22 1.25l.37-.37a.997.997 0 011.414 0l.707.707a.997.997 0 010 1.414l-.37.37c.63.63 1.05 1.39 1.25 2.22l.95.23a.996.996 0 01.75 1.22l-.5 2a.996.996 0 01-1.22.75l-.95-.23c-.2.83-.62 1.59-1.25-2.22l.37.37a.997.997 0 010 1.414l-.707.707a.997.997 0 01-1.414 0zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" fillRule="evenodd"></path>
             </svg>
           </button>
         </div>
@@ -965,6 +1154,38 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
                     </button>
                   ))}
                 </div>
+                <div className="mt-2 flex flex-col gap-1">
+                  <span className="text-white/40 text-[8px] uppercase">Pin_Behavior</span>
+                  <div className="grid grid-cols-2 gap-1">
+                    <button
+                      onClick={() => setSmartPinning(!smartPinning)}
+                      className={`text-[9px] text-center px-2 py-1 transition-all border ${
+                        smartPinning ? 'bg-selection/30 border-selection text-selection' : 'bg-white/5 border-transparent text-white/50 hover:bg-white/10'
+                      }`}
+                      aria-pressed={smartPinning}
+                    >
+                      {smartPinning ? 'SMART ON' : 'SMART OFF'}
+                    </button>
+                    <button
+                      onClick={() => setBodySyncMode(!bodySyncMode)}
+                      className={`text-[9px] text-center px-2 py-1 transition-all border ${
+                        bodySyncMode ? 'bg-selection/30 border-selection text-selection' : 'bg-white/5 border-transparent text-white/50 hover:bg-white/10'
+                      }`}
+                      aria-pressed={bodySyncMode}
+                    >
+                      {bodySyncMode ? 'MIRROR ON' : 'MIRROR OFF'}
+                    </button>
+                    <button
+                      onClick={() => setOmniSyncMode(!omniSyncMode)}
+                      className={`text-[9px] text-center px-2 py-1 transition-all border ${
+                        omniSyncMode ? 'bg-selection/30 border-selection text-selection' : 'bg-white/5 border-transparent text-white/50 hover:bg-white/10'
+                      }`}
+                      aria-pressed={omniSyncMode}
+                    >
+                      {omniSyncMode ? 'OMNI ON' : 'OMNI OFF'}
+                    </button>
+                  </div>
+                </div>
                 <div className="flex flex-col gap-1 border-t border-white/10 pt-2 mt-2 items-center">
                   <span className="text-white/40 uppercase text-[8px]">Global_Rotation_Angle</span>
                   <RotationWheelControl
@@ -1098,6 +1319,48 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
                       {_mode.toUpperCase()}
                     </button>
                   ))}
+                </div>
+                <div className="mt-2 flex flex-col gap-1">
+                  <span className="text-white/40 text-[8px] uppercase">Model_Shape</span>
+                  <div className="grid grid-cols-2 gap-1">
+                    {(['default', 'oval'] as const).map(style => (
+                      <button
+                        key={style}
+                        onClick={() => setMannequinStyle(style)}
+                        className={`text-[9px] text-center px-2 py-1 transition-all border ${
+                          mannequinStyle === style 
+                            ? 'bg-selection/30 border-selection text-selection' 
+                            : 'bg-white/5 border-transparent text-white/50 hover:bg-white/10'
+                        }`}
+                        aria-pressed={mannequinStyle === style}
+                      >
+                        {style === 'default' ? 'STANDARD' : 'OVAL BITRUVIUS'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="mt-2 flex flex-col gap-1">
+                  <span className="text-white/40 text-[8px] uppercase">Bone_Toggles</span>
+                  <div className="grid grid-cols-2 gap-1">
+                    <button
+                      onClick={() => setShowPins(!showPins)}
+                      className={`text-[9px] text-center px-2 py-1 transition-all border ${
+                        showPins ? 'bg-selection/30 border-selection text-selection' : 'bg-white/5 border-transparent text-white/50 hover:bg-white/10'
+                      }`}
+                      aria-pressed={showPins}
+                    >
+                      {showPins ? 'ANCHORS ON' : 'ANCHORS OFF'}
+                    </button>
+                    <button
+                      onClick={() => setShowBoneOverlay(!showBoneOverlay)}
+                      className={`text-[9px] text-center px-2 py-1 transition-all border ${
+                        showBoneOverlay ? 'bg-selection/30 border-selection text-selection' : 'bg-white/5 border-transparent text-white/50 hover:bg-white/10'
+                      }`}
+                      aria-pressed={showBoneOverlay}
+                    >
+                      {showBoneOverlay ? 'AXIS ON' : 'AXIS OFF'}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -1303,6 +1566,180 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
           )}
         </DraggablePanel>
 
+        {/* MOVEMENT SETTINGS (Animation Controls Panel) */}
+        <DraggablePanel
+          id="movement-settings-panel"
+          title="MOVEMENT SETTINGS"
+          x={movementPanel.x}
+          y={movementPanel.y}
+          minimized={movementPanel.minimized}
+          onUpdateRect={(id, rect) => updatePanelRect(id, rect)}
+          onUpdatePosition={(id, x, y, minimized) => updatePanelPosition(id, x, y, minimized)}
+          allPanelRects={allPanelRectsArray}
+          onBringToFront={bringPanelToFront}
+          currentZIndex={panelZIndices['movement-settings-panel']}
+          className="w-80 max-h-[90vh] overflow-y-auto custom-scrollbar"
+        >
+          <div className="flex flex-col gap-3">
+            <div className="text-white/50 text-[9px] uppercase tracking-wider">Animation Engine</div>
+            <EnhancedTimeline
+              sequence={sequence}
+              currentPose={activePose}
+              viewingPose={viewingPose}
+              selectedSlotId={selectedSlotId}
+              autoInterpolation={autoInterpolation}
+              onScrubPositionChange={sequenceActions.setScrubPosition}
+              onSlotClick={handleSlotClick}
+              onSlotUpdate={sequenceActions.updateSlot}
+              onSlotLabelUpdate={sequenceActions.updateSlotLabel}
+              onSlotDelete={sequenceActions.removeSlot}
+              onSlotReorder={sequenceActions.reorderSlots}
+              onTransitionUpdate={sequenceActions.updateSlotTransition}
+              onPlay={sequenceActions.play}
+              onPause={sequenceActions.pause}
+              onStop={sequenceActions.stop}
+              onLoopToggle={sequenceActions.setLoop}
+              onAddSlot={sequenceActions.addSlot}
+              onEasingToggle={sequenceActions.setEasingEnabled}
+              onSmoothToggle={sequenceActions.setSmoothTransitions}
+              onIKToggle={sequenceActions.setIKAssisted}
+              onAutoInterpolationToggle={() => setAutoInterpolation(!autoInterpolation)}
+              onExitPoseView={exitPoseView}
+            />
+            <MovementSettings
+              sequence={sequence}
+              autoInterpolation={autoInterpolation}
+              onEasingToggle={sequenceActions.setEasingEnabled}
+              onSmoothToggle={sequenceActions.setSmoothTransitions}
+              onIKToggle={sequenceActions.setIKAssisted}
+              onAutoInterpolationToggle={() => setAutoInterpolation(!autoInterpolation)}
+            />
+            <div className="pt-3 border-t border-white/10 flex flex-col gap-2 text-[9px] uppercase">
+              <div className="flex items-center justify-between">
+                <span>Walking Engine</span>
+                <button
+                  onClick={() => {
+                    setWalkingEnabled(!walkingEnabled);
+                    addLog(`[WALK]: ENGINE ${walkingEnabled ? 'OFF' : 'ON'}`);
+                  }}
+                  className={`text-[9px] px-2 py-1 border transition-all ${
+                    walkingEnabled ? 'bg-accent-green/20 border-accent-green text-accent-green' : 'bg-white/5 border-white/10 text-white/40'
+                  }`}
+                  aria-pressed={walkingEnabled}
+                >
+                  {walkingEnabled ? 'ENABLED' : 'DISABLED'}
+                </button>
+              </div>
+              <div className="flex flex-col gap-1">
+                <span className="text-white/40 text-[8px] uppercase">Gait_Depth</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={gaitDepth}
+                  onChange={(e) => setGaitDepth(parseInt(e.target.value, 10))}
+                  className="w-full"
+                />
+                <div className="text-white/60 text-[8px]">{gaitDepth}%</div>
+              </div>
+              <div className="flex flex-col gap-1">
+                <span className="text-white/40 text-[8px] uppercase">Pin_Mode</span>
+                <div className="grid grid-cols-2 gap-1">
+                  {(['none', 'leftFoot', 'rightFoot', 'dual'] as const).map(mode => (
+                    <button
+                      key={mode}
+                      onClick={() => setWalkingPinMode(mode)}
+                      className={`text-[9px] text-center px-2 py-1 transition-all border ${
+                        walkingPinMode === mode ? 'bg-selection/30 border-selection text-selection' : 'bg-white/5 border-transparent text-white/50 hover:bg-white/10'
+                      }`}
+                      aria-pressed={walkingPinMode === mode}
+                    >
+                      {mode === 'none' ? 'NONE' : mode === 'leftFoot' ? 'LEFT' : mode === 'rightFoot' ? 'RIGHT' : 'DUAL'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </DraggablePanel>
+
+        <DraggablePanel
+          id="system-status-panel"
+          title="SYSTEM STATUS"
+          x={systemStatusPanel.x}
+          y={systemStatusPanel.y}
+          minimized={systemStatusPanel.minimized}
+          onUpdateRect={(id, rect) => updatePanelRect(id, rect)}
+          onUpdatePosition={(id, x, y, minimized) => updatePanelPosition(id, x, y, minimized)}
+          allPanelRects={allPanelRectsArray}
+          onBringToFront={bringPanelToFront}
+          currentZIndex={panelZIndices['system-status-panel']}
+          className="w-56"
+        >
+          <div className="flex flex-col gap-2 text-[9px] uppercase">
+            <div className="flex items-center justify-between">
+              <span>Power</span>
+              <span className={isPoweredOn ? 'text-accent-green' : 'text-accent-red'}>
+                {isPoweredOn ? 'ACTIVE' : 'STANDBY'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>Mode</span>
+              <span className="text-focus-ring">{kinematicMode.toUpperCase()}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>View</span>
+              <span className="text-accent-green">{viewMode.toUpperCase()}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>Pins</span>
+              <span className="text-accent-red truncate max-w-[120px]">{getPinName(activePins)}</span>
+            </div>
+          </div>
+        </DraggablePanel>
+
+        <DraggablePanel
+          id="command-log-panel"
+          title="COMMAND LOG"
+          x={commandLogPanel.x}
+          y={commandLogPanel.y}
+          minimized={commandLogPanel.minimized}
+          onUpdateRect={(id, rect) => updatePanelRect(id, rect)}
+          onUpdatePosition={(id, x, y, minimized) => updatePanelPosition(id, x, y, minimized)}
+          allPanelRects={allPanelRectsArray}
+          onBringToFront={bringPanelToFront}
+          currentZIndex={panelZIndices['command-log-panel']}
+          className="w-56"
+        >
+          <div className="h-44 overflow-y-auto custom-scrollbar text-[8px] text-white/60 space-y-1">
+            {systemLogs.map((entry, index) => (
+              <div key={`${entry.timestamp}-${index}`} className="flex gap-2">
+                <span className="text-white/30">{entry.timestamp}</span>
+                <span className="text-white/70">{entry.message}</span>
+              </div>
+            ))}
+          </div>
+        </DraggablePanel>
+
+        <DraggablePanel
+          id="pose-data-terminal-panel"
+          title="POSE DATA TERMINAL"
+          x={poseDataPanel.x}
+          y={poseDataPanel.y}
+          minimized={poseDataPanel.minimized}
+          onUpdateRect={(id, rect) => updatePanelRect(id, rect)}
+          onUpdatePosition={(id, x, y, minimized) => updatePanelPosition(id, x, y, minimized)}
+          allPanelRects={allPanelRectsArray}
+          onBringToFront={bringPanelToFront}
+          currentZIndex={panelZIndices['pose-data-terminal-panel']}
+          className="w-56"
+        >
+          <div className="text-[8px] text-white/70 whitespace-pre-wrap break-all h-36 overflow-y-auto custom-scrollbar bg-white/5 p-2 rounded border border-white/10">
+            {poseToString(activePose)}
+          </div>
+        </DraggablePanel>
+
         <div className="w-full h-full bg-selection-super-light bg-triangle-grid flex items-center justify-center relative">
           <Scanlines />
           {showSplash && (
@@ -1323,7 +1760,9 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
               <Mannequin
                 pose={activePose}
                 ghostPose={isDragging.current ? ghostPose : undefined}
-                showOverlay={true}
+                showOverlay={showBoneOverlay}
+                showPins={showPins}
+                modelStyle={mannequinStyle}
                 selectedParts={selectedParts}
                 visibility={visibility}
                 activePins={activePins}

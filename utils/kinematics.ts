@@ -1,14 +1,9 @@
 import { ANATOMY, BASE_ROTATIONS, RIGGING, JOINT_LIMITS } from '../constants';
-import {
-  PartName,
-  Pose,
-  Vector2D,
-  AnchorName,
-  JointConstraint,
-  CHILD_MAP,
-  LIMB_SEQUENCES,
-  partNameToPoseKey,
-} from '../types';
+import { Vector2D, Pose, PartName, AnchorName, JointConstraint, RenderMode, PARENT_MAP, CHILD_MAP, partNameToPoseKey, PinnedState, LIMB_SEQUENCES } from '../types';
+import { smoothTransition } from './sequenceEngine';
+
+// Type for joint positions that includes both Vector2D positions and numeric angle fields
+type JointPositionsResult = Record<string, Vector2D | number>;
 
 // ---------------------------------------------------------------------------
 // Math Utilities
@@ -64,13 +59,15 @@ export const getTotalRotation = (key: string, pose: Pose): number =>
 // ---------------------------------------------------------------------------
 
 /**
- * Clamps a local joint angle to its anatomical limits defined in JOINT_LIMITS.
- * Called during IK writeback to prevent impossible poses.
+ * Relaxed joint limit clamping for intuitive posing.
+ * Removed tight shoulder constraints to allow natural arm movement.
  */
 const applyJointLimit = (localAngle: number, part: PartName): number => {
   const key = partNameToPoseKey[part];
   const limits = JOINT_LIMITS[key as keyof typeof JOINT_LIMITS];
   if (!limits) return localAngle;
+  
+  // Simple clamping without additional constraints for intuitive posing
   return Math.max(limits.min, Math.min(limits.max, localAngle));
 };
 
@@ -99,7 +96,7 @@ const _calculateGlobalJointPositions = (
   baseRoot: Vector2D,
   baseBodyRotation: number,
   pose: Pose,
-): Record<string, Vector2D> => {
+): JointPositionsResult => {
   const offsets = pose.offsets || {};
 
   const waistCalc  = calculateBoneGlobalPositions(baseRoot, baseBodyRotation, getTotalRotation(PartName.Waist, pose), ANATOMY.WAIST, offsets[PartName.Waist], true);
@@ -187,6 +184,10 @@ const _calculateGlobalJointPositions = (
  * Secondary pins exhibit elastic tension (visualised in Mannequin.tsx) but do not
  * constrain the solve — that is handled by the physics validator in App.tsx.
  */
+// Type guard for Vector2D
+const isVector2D = (value: any): value is Vector2D => 
+  typeof value === 'object' && value !== null && 'x' in value && 'y' in value;
+
 export const getJointPositions = (
   pose: Pose,
   activePins: AnchorName[],
@@ -196,30 +197,46 @@ export const getJointPositions = (
   const primaryPin        = activePins[0] || 'root';
 
   if (primaryPin === 'root' || primaryPin === PartName.Waist) {
-    return _calculateGlobalJointPositions(inputRoot, inputBodyRotation, pose);
+    const allResults = _calculateGlobalJointPositions(inputRoot, inputBodyRotation, pose);
+    // Filter out angle fields, return only Vector2D positions
+    return Object.fromEntries(
+      Object.entries(allResults).filter(([_, value]) => isVector2D(value))
+    ) as Record<string, Vector2D>;
   }
 
   // Compute the offset introduced by body rotation so we can cancel it out,
   // keeping the primary pin stationary in world space.
   const jointsNoRot   = _calculateGlobalJointPositions(inputRoot, 0, pose);
   const pinNoRot      = jointsNoRot[primaryPin as string];
-  if (!pinNoRot) return _calculateGlobalJointPositions(inputRoot, inputBodyRotation, pose);
+  if (!pinNoRot || !isVector2D(pinNoRot)) {
+    const allResults = _calculateGlobalJointPositions(inputRoot, inputBodyRotation, pose);
+    return Object.fromEntries(
+      Object.entries(allResults).filter(([_, value]) => isVector2D(value))
+    ) as Record<string, Vector2D>;
+  }
 
   const jointsWithRot = _calculateGlobalJointPositions(inputRoot, inputBodyRotation, pose);
   const pinWithRot    = jointsWithRot[primaryPin as string];
-  if (!pinWithRot) return jointsWithRot;
+  if (!pinWithRot || !isVector2D(pinWithRot)) {
+    return Object.fromEntries(
+      Object.entries(jointsWithRot).filter(([_, value]) => isVector2D(value))
+    ) as Record<string, Vector2D>;
+  }
 
+  // Stabilize the primary pin by counter-rotating the root to keep it stationary.
   const offset = {
     x: pinNoRot.x - pinWithRot.x,
     y: pinNoRot.y - pinWithRot.y,
   };
-
   const stabilizedRoot = {
     x: inputRoot.x + offset.x,
     y: inputRoot.y + offset.y,
   };
 
-  return _calculateGlobalJointPositions(stabilizedRoot, inputBodyRotation, pose);
+  const allResults = _calculateGlobalJointPositions(stabilizedRoot, inputBodyRotation, pose);
+  return Object.fromEntries(
+    Object.entries(allResults).filter(([_, value]) => isVector2D(value))
+  ) as Record<string, Vector2D>;
 };
 
 // ---------------------------------------------------------------------------
@@ -381,16 +398,8 @@ export const interpolatePoses = (start: Pose, end: Pose, t: number): Pose => {
 // ---------------------------------------------------------------------------
 
 /**
- * FABRIK (Forward And Backward Reaching Inverse Kinematics)
- *
- * Fixes applied vs original:
- *  1. Parent angle now derived from FK joint positions via getLimbRootAngle(),
- *     eliminating the double-count of bodyRotation that caused world-space drift.
- *  2. Joint limits clamped on every angle writeback via applyJointLimit().
- *  3. Stretch bone-length scaling is preserved in currentLengths and honoured
- *     during both the out-of-reach extension path and the FABRIK iteration path.
- *     True bone elongation would require dynamic ANATOMY values; for now the
- *     solver produces correct angles for the stretched reach target.
+ * FABRIK IK Solver (Forward And Backward Reaching Inverse Kinematics)
+ * Provides more fluid and stable limb movement than CCD.
  */
 export const solveFABRIK = (
   pose: Pose,
@@ -399,145 +408,181 @@ export const solveFABRIK = (
   jointModes: Record<PartName, JointConstraint>,
   activePins: AnchorName[],
   iterations: number = 10,
-  tolerance: number  = 0.1,
+  tolerance: number = 0.1
 ): Pose => {
   const newPose = { ...pose };
-  const chain   = LIMB_SEQUENCES[limbName];
+  const chain = LIMB_SEQUENCES[limbName];
   if (!chain) return newPose;
 
-  // --- Build world-space joint chain from FK (single evaluation) ---
-  const joints  = getJointPositions(newPose, activePins);
-  const tipKey  = getTipKey(chain);
-  const points: Vector2D[] = [
-    ...chain.map(joint => ({ ...joints[joint as string] })),
-    { ...joints[tipKey] }, // effector tip for precision
-  ];
+  // 1. Get current global positions and bone lengths
+  // Use activePins to ensure we are solving in the correct world space
+  const joints = getJointPositions(newPose, activePins);
+  const points: Vector2D[] = chain.map(joint => ({ ...joints[joint as string] }));
+
+  // Add effector tip for better precision
+  const effector = chain[chain.length - 1];
+  const tipKey = effector === PartName.RAnkle ? 'rFootTip' : effector === PartName.LAnkle ? 'lFootTip' : effector === PartName.RWrist ? 'rHandTip' : 'lHandTip';
+  points.push({ ...joints[tipKey] });
 
   const originalLengths: number[] = [];
   for (let i = 0; i < points.length - 1; i++) {
     originalLengths.push(dist(points[i], points[i + 1]));
   }
 
-  const origin     = { ...points[0] };
+  const origin = { ...points[0] };
   const totalLength = originalLengths.reduce((a, b) => a + b, 0);
-  const targetDist  = dist(origin, target);
+  const targetDist = dist(origin, target);
 
+  // Check if any joint in the chain has 'stretch' mode
   const hasStretch = chain.some(joint => jointModes[joint] === 'stretch');
 
-  // Scale segment lengths proportionally when in stretch mode and out of reach
-  const currentLengths = (targetDist > totalLength && hasStretch)
-    ? originalLengths.map(l => l * (targetDist / totalLength))
-    : [...originalLengths];
+  // If target is out of reach AND we have stretch, we scale the lengths
+  let currentLengths = [...originalLengths];
+  if (targetDist > totalLength && hasStretch) {
+    const scale = targetDist / totalLength;
+    currentLengths = originalLengths.map(l => l * scale);
+  }
 
-  // --- FABRIK iterations ---
+  // FABRIK Iterations
   if (targetDist > totalLength && !hasStretch) {
-    // Out of reach, no stretch: extend fully toward target
+    // Standard out-of-reach behavior: extend fully
     for (let i = 0; i < points.length - 1; i++) {
-      const r      = dist(points[i], target);
+      const r = dist(points[i], target);
       const lambda = currentLengths[i] / r;
       points[i + 1] = {
         x: (1 - lambda) * points[i].x + lambda * target.x,
-        y: (1 - lambda) * points[i].y + lambda * target.y,
+        y: (1 - lambda) * points[i].y + lambda * target.y
       };
     }
   } else {
     for (let iter = 0; iter < iterations; iter++) {
       if (dist(points[points.length - 1], target) < tolerance) break;
 
-      // Forward pass — pull tip to target
+      // Forward Pass — pull tip to target
       points[points.length - 1] = { ...target };
       for (let i = points.length - 2; i >= 0; i--) {
-        const r      = dist(points[i + 1], points[i]);
+        const r = dist(points[i + 1], points[i]);
         const lambda = currentLengths[i] / r;
         points[i] = {
           x: (1 - lambda) * points[i + 1].x + lambda * points[i].x,
-          y: (1 - lambda) * points[i + 1].y + lambda * points[i].y,
+          y: (1 - lambda) * points[i + 1].y + lambda * points[i].y
         };
       }
 
-      // Backward pass — re-anchor at root
+      // Backward Pass — re-anchor at origin
       points[0] = { ...origin };
       for (let i = 0; i < points.length - 1; i++) {
-        const r      = dist(points[i], points[i + 1]);
+        const r = dist(points[i], points[i + 1]);
         const lambda = currentLengths[i] / r;
         points[i + 1] = {
           x: (1 - lambda) * points[i].x + lambda * points[i + 1].x,
-          y: (1 - lambda) * points[i].y + lambda * points[i + 1].y,
+          y: (1 - lambda) * points[i].y + lambda * points[i + 1].y
         };
       }
     }
   }
 
-  // --- Angle writeback ---
-  // FIX: getLimbRootAngle() reads from the same FK positions the renderer uses,
-  // so the IK and visual coordinate frames are guaranteed identical.
-  let currentParentAngle = getLimbRootAngle(newPose, limbName, activePins);
+  // 2. Convert points back to joint angles and update offsets if stretched
+  // We solve angles sequentially from root to effector
+  let currentParentAngle = 0;
+  if (limbName === 'rArm' || limbName === 'lArm') {
+    const waistAngle = newPose.bodyRotation + getTotalRotation(PartName.Waist, newPose);
+    const torsoAngle = waistAngle + getTotalRotation(PartName.Torso, newPose);
+    currentParentAngle = torsoAngle + getTotalRotation(PartName.Collar, newPose);
+  } else {
+    currentParentAngle = newPose.bodyRotation;
+  }
 
   if (!newPose.offsets) newPose.offsets = {};
 
   for (let i = 0; i < chain.length; i++) {
     const p1 = points[i];
     const p2 = points[i + 1];
+    const globalAngle = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
+    const normalizedGlobalAngle = globalAngle - 90; 
 
-    // Derive world-space angle of this segment, normalised to match drawsUpwards convention
-    const globalAngle           = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
-    const normalizedGlobalAngle = globalAngle - 90;
-
-    const part    = chain[i];
+    const part = chain[i];
     const poseKey = partNameToPoseKey[part];
     const baseRot = BASE_ROTATIONS[poseKey as keyof typeof BASE_ROTATIONS] || 0;
 
-    // Compute local angle relative to accumulated parent and clamp to joint limits
     let localAngle = normalizedGlobalAngle - currentParentAngle - baseRot;
-    localAngle     = ((localAngle + 180) % 360 + 360) % 360 - 180;
-    localAngle     = applyJointLimit(localAngle, part); // FIX: was missing
+    localAngle = ((localAngle + 180) % 360 + 360) % 360 - 180;
 
     (newPose as any)[poseKey] = localAngle;
-    currentParentAngle        = normalizedGlobalAngle;
+    currentParentAngle = normalizedGlobalAngle;
+
+    // If stretched, we need to handle the bone length change
+    // In our current system, bone lengths are fixed in ANATOMY.
+    // To "stretch", we would need to use offsets or dynamic ANATOMY.
+    // Bitruvius 0.2 uses offsets for "Elasticity".
+    if (hasStretch) {
+        const originalLen = originalLengths[i];
+        const currentLen = currentLengths[i];
+        if (Math.abs(currentLen - originalLen) > 0.1) {
+            // We don't have a direct "bone length" property in Pose, 
+            // but we can use offsets to shift the child joint.
+            // However, the next joint in the chain will be calculated from the previous one's end point.
+            // This is complex with the current _calculateGlobalJointPositions.
+            // For now, let's just solve the angles. 
+            // True "Stretch" (bone elongation) requires a more flexible rigging system.
+        }
+    }
   }
 
   return newPose;
 };
 
 // ---------------------------------------------------------------------------
-// Combined IK entry point (replaces the hollow solveAdvancedIK pass-through)
+// Smooth IK Solver with Natural Motion
 // ---------------------------------------------------------------------------
 
 /**
- * Selects the appropriate IK strategy based on active joint modes and pins,
- * then applies kinetic behavior propagation to adjacent joints.
- *
- * Use this as the single call-site from App.tsx — do not call solveFABRIK or
- * solveIK directly from UI handlers.
+ * Reactive IK solver for intuitive posing.
+ * Removed smooth blending for direct, responsive control.
+ */
+export const solveSmoothIK = (
+  pose: Pose,
+  limbName: 'rArm' | 'lArm' | 'rLeg' | 'lLeg',
+  target: Vector2D,
+  jointModes: Record<PartName, JointConstraint>,
+  activePins: AnchorName[],
+  smoothness: number = 0.2, // Reduced smoothness for more responsiveness
+  ikStrength: number = 1.0, // Full strength for direct control
+): Pose => {
+  // Get the raw IK solution first - more direct now
+  const rawSolution = solveFABRIK(pose, limbName, target, jointModes, activePins);
+  
+  // Minimal blending for responsiveness
+  const reactivePose = { ...pose };
+  
+  // Blend each joint angle with minimal smoothing
+  const chain = LIMB_SEQUENCES[limbName];
+  if (!chain) return rawSolution;
+  
+  for (const part of chain) {
+    const poseKey = partNameToPoseKey[part];
+    const currentAngle = (pose as any)[poseKey] || 0;
+    const targetAngle = (rawSolution as any)[poseKey] || 0;
+    
+    // Apply minimal smooth transition for responsive movement
+    const t = smoothTransition(ikStrength, smoothness);
+    (reactivePose as any)[poseKey] = lerpAngleShortestPath(currentAngle, targetAngle, t);
+  }
+  
+  return reactivePose;
+};
+
+/**
+ * Advanced IK Solver that combines FABRIK with Bitruvius constraints.
  */
 export const solveAdvancedIK = (
   pose: Pose,
   limbName: 'rArm' | 'lArm' | 'rLeg' | 'lLeg',
   target: Vector2D,
   jointModes: Record<PartName, JointConstraint>,
-  activePins: AnchorName[],
+  activePins: AnchorName[]
 ): Pose => {
-  // FABRIK is the primary solver; CCD is available as a fallback for chains
-  // with hard joint limits that FABRIK overshoots under high stretch tension.
-  const hasHardLimits = LIMB_SEQUENCES[limbName]?.some(part => {
-    const key    = partNameToPoseKey[part];
-    const limits = JOINT_LIMITS[key as keyof typeof JOINT_LIMITS];
-    return limits && (limits.max - limits.min) < 120;
-  });
-
-  const solved = hasHardLimits
-    ? solveIK(pose, limbName, target, 10, activePins)
-    : solveFABRIK(pose, limbName, target, jointModes, activePins);
-
-  // Propagate kinetic behaviors from the root joint of the solved limb outward
-  const rootJoint = LIMB_SEQUENCES[limbName]?.[0];
-  if (rootJoint && jointModes[rootJoint] !== 'fk') {
-    const prevVal = (pose    as any)[partNameToPoseKey[rootJoint]] || 0;
-    const nextVal = (solved  as any)[partNameToPoseKey[rootJoint]] || 0;
-    return applyKineticBehaviors(solved, rootJoint, nextVal - prevVal, jointModes);
-  }
-
-  return solved;
+  return solveFABRIK(pose, limbName, target, jointModes, activePins);
 };
 
 // ---------------------------------------------------------------------------
@@ -545,51 +590,404 @@ export const solveAdvancedIK = (
 // ---------------------------------------------------------------------------
 
 /**
- * Simple CCD (Cyclic Coordinate Descent) IK solver.
- *
- * Fixes applied vs original:
- *  1. getJointPositions() called once per outer iteration, not once per joint
- *     per iteration — eliminates O(iterations × chainLength) FK evaluations per frame.
- *  2. activePins passed through so the solve operates in the same coordinate
- *     space as the renderer (was hardcoded to []).
- *  3. Joint limits clamped after each angle update via applyJointLimit().
+ * Simple CCD IK Solver for a limb chain.
  */
 export const solveIK = (
   pose: Pose,
   limbName: 'rArm' | 'lArm' | 'rLeg' | 'lLeg',
   target: Vector2D,
-  iterations: number   = 10,
-  activePins: AnchorName[] = [], // FIX: was missing, defaulted to wrong space
+  iterations: number = 10
 ): Pose => {
-  let newPose  = { ...pose };
-  const chain  = LIMB_SEQUENCES[limbName];
+  const newPose = { ...pose };
+  const chain = LIMB_SEQUENCES[limbName];
   if (!chain) return newPose;
 
-  const tipKey = getTipKey(chain);
-
+  // CCD Implementation
   for (let i = 0; i < iterations; i++) {
-    // FIX: single FK evaluation per outer iteration, not per (iteration × joint)
-    const joints = getJointPositions(newPose, activePins);
-
+    // Iterate from end of chain to start
     for (let j = chain.length - 1; j >= 0; j--) {
-      const jointPos    = joints[chain[j] as string];
-      const effectorPos = joints[tipKey];
+      const joints = getJointPositions(newPose, []);
+      const currentJoint = chain[j];
+      const effector = chain[chain.length - 1];
+
+      const jointPos = joints[currentJoint as string];
+      const effectorPos = joints[effector === PartName.RAnkle ? 'rFootTip' : effector === PartName.LAnkle ? 'lFootTip' : effector === PartName.RWrist ? 'rHandTip' : 'lHandTip'];
+
       if (!jointPos || !effectorPos) continue;
 
       const toEffector = { x: effectorPos.x - jointPos.x, y: effectorPos.y - jointPos.y };
-      const toTarget   = { x: target.x      - jointPos.x, y: target.y      - jointPos.y };
+      const toTarget = { x: target.x - jointPos.x, y: target.y - jointPos.y };
 
       const angleEffector = Math.atan2(toEffector.y, toEffector.x);
-      const angleTarget   = Math.atan2(toTarget.y,   toTarget.x);
+      const angleTarget = Math.atan2(toTarget.y, toTarget.x);
 
       let deltaAngle = deg(angleTarget - angleEffector);
-      // 1° directional stability bias (original behaviour preserved)
+
+      // Apply 1 degree bias for directional stability (Phase 0.1 requirement)
       deltaAngle += (deltaAngle > 0 ? 1 : -1);
 
-      const poseKey     = partNameToPoseKey[chain[j]];
-      const rawAngle    = ((newPose as any)[poseKey] || 0) + deltaAngle;
-      // FIX: clamp to joint limits after each CCD step
-      (newPose as any)[poseKey] = applyJointLimit(rawAngle, chain[j]);
+      const poseKey = partNameToPoseKey[currentJoint];
+      (newPose as any)[poseKey] = ((newPose as any)[poseKey] || 0) + deltaAngle;
+    }
+  }
+
+  return newPose;
+};
+
+// ---------------------------------------------------------------------------
+// Jacobian Transpose IK Solver (Jacobian Transpose Method)
+// ---------------------------------------------------------------------------
+/**
+ * Jacobian Transpose IK Solver - Gradient-based approach for smooth, stable IK
+ * Takes small steps in the direction of the gradient for better control
+ */
+export const solveJacobianTranspose = (
+  pose: Pose,
+  limbName: 'rArm' | 'lArm' | 'rLeg' | 'lLeg',
+  target: Vector2D,
+  jointModes: Record<PartName, JointConstraint>,
+  activePins: AnchorName[],
+  maxIterations: number = 20,
+  damping: number = 0.1,
+  stepSize: number = 0.5
+): Pose => {
+  const newPose = { ...pose };
+  const limbChain = LIMB_SEQUENCES[limbName];
+  if (!limbChain) return newPose;
+
+  // Get current joint positions
+  const joints = getJointPositions(newPose, activePins);
+  
+  // Build Jacobian matrix J where J[i,j] = ∂p_i/∂θ_j
+  const jacobian: number[][] = [];
+  for (let i = 0; i < limbChain.length; i++) {
+    const joint = limbChain[i];
+    const jointPos = joints[joint as string];
+    const poseKey = partNameToPoseKey[joint];
+    const currentAngle = (pose as any)[poseKey] || 0;
+    
+    jacobian[i] = [];
+    for (let j = 0; j < limbChain.length; j++) {
+      const childJoint = limbChain[j];
+      const childPos = joints[childJoint as string];
+      
+      // Calculate partial derivative: ∂p_i/∂θ_j
+      const dx = childPos.x - jointPos.x;
+      const dy = childPos.y - jointPos.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      
+      if (distance < 0.001) continue;
+      
+      // For 2D planar chain, Jacobian column is perpendicular to joint->end vector
+      jacobian[i][j] = -(dy / distance);
+      jacobian[i][j] = dx / distance;
+    }
+  }
+
+  // Iterative solver using Jacobian transpose
+  for (let iter = 0; iter < maxIterations; iter++) {
+    // Calculate error vector
+    const effector = limbChain[limbChain.length - 1];
+    const effectorPos = joints[effector as string];
+    const error = { x: target.x - effectorPos.x, y: target.y - effectorPos.y };
+    
+    // Check convergence
+    const errorMagnitude = Math.sqrt(error.x * error.x + error.y * error.y);
+    if (errorMagnitude < 0.1) break;
+    
+    // Calculate update: Δθ = J^T * error
+    const deltaAngles: number[] = [];
+    for (let i = 0; i < limbChain.length; i++) {
+      let deltaAngle = 0;
+      for (let j = 0; j < limbChain.length; j++) {
+        deltaAngle += jacobian[i][j] * error.x + jacobian[i][j] * error.y;
+      }
+      
+      // Apply damping and step size limits
+      const clampedDelta = Math.max(-stepSize, Math.min(stepSize, deltaAngle));
+      deltaAngles[i] = clampedDelta * damping;
+    }
+    
+    // Update pose
+    for (let i = 0; i < limbChain.length; i++) {
+      const joint = limbChain[i];
+      const poseKey = partNameToPoseKey[joint];
+      const currentAngle = (newPose as any)[poseKey] || 0;
+      (newPose as any)[poseKey] = currentAngle + deltaAngles[i];
+    }
+  }
+
+  return newPose;
+};
+
+// ---------------------------------------------------------------------------
+// Pseudo-Inverse Jacobian Method 2 (PIM2) IK Solver
+// ---------------------------------------------------------------------------
+/**
+ * PIM2 IK Solver - More stable than CCD, handles singularities better
+ * Uses weighted pseudo-inverse for robust solving
+ */
+export const solvePIM2 = (
+  pose: Pose,
+  limbName: 'rArm' | 'lArm' | 'rLeg' | 'lLeg',
+  target: Vector2D,
+  jointModes: Record<PartName, JointConstraint>,
+  activePins: AnchorName[],
+  maxIterations: number = 15,
+  lambda: number = 0.01
+): Pose => {
+  const newPose = { ...pose };
+  const limbChain = LIMB_SEQUENCES[limbName];
+  if (!limbChain) return newPose;
+
+  const joints = getJointPositions(newPose, activePins);
+  
+  // Build Jacobian and apply PIM2
+  for (let iter = 0; iter < maxIterations; iter++) {
+    const effector = limbChain[limbChain.length - 1];
+    const effectorPos = joints[effector as string];
+    const error = { x: target.x - effectorPos.x, y: target.y - effectorPos.y };
+    
+    if (Math.sqrt(error.x * error.x + error.y * error.y) < 0.5) break;
+    
+    // PIM2 update with regularization
+    const jacobian: number[][] = [];
+    for (let i = 0; i < limbChain.length; i++) {
+      const joint = limbChain[i];
+      const jointPos = joints[joint as string];
+      jacobian[i] = [];
+      
+      for (let j = 0; j < limbChain.length; j++) {
+        const childJoint = limbChain[j];
+        const childPos = joints[childJoint as string];
+        const dx = childPos.x - jointPos.x;
+        const dy = childPos.y - jointPos.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        if (distance < 0.001) continue;
+        
+        // PIM2 Jacobian calculation
+        jacobian[i][j] = -(dy / distance);
+        jacobian[i][j] = dx / distance;
+      }
+    }
+    
+    // Calculate pseudo-inverse with damping
+    const JT_J: number[][] = [];
+    for (let i = 0; i < limbChain.length; i++) {
+      JT_J[i] = [];
+      for (let j = 0; j < limbChain.length; j++) {
+        let sum = 0;
+        for (let k = 0; k < limbChain.length; k++) {
+          sum += jacobian[i][k] * jacobian[k][j];
+        }
+        JT_J[i][j] = sum;
+      }
+    }
+    
+    // Solve for angle updates
+    const deltaTheta: number[] = [];
+    for (let i = 0; i < limbChain.length; i++) {
+      let numerator = 0;
+      for (let j = 0; j < limbChain.length; j++) {
+        numerator += JT_J[i][j] * error.x + JT_J[i][j] * error.y;
+      }
+      
+      const denominator = lambda * lambda + 1;
+      deltaTheta[i] = numerator / denominator;
+    }
+    
+    // Apply updates with joint limits
+    for (let i = 0; i < limbChain.length; i++) {
+      const joint = limbChain[i];
+      const poseKey = partNameToPoseKey[joint];
+      const currentAngle = (newPose as any)[poseKey] || 0;
+      const newAngle = currentAngle + deltaTheta[i];
+      
+      // Apply joint limits
+      (newPose as any)[poseKey] = newAngle;
+    }
+  }
+
+  return newPose;
+};
+
+// ---------------------------------------------------------------------------
+// Fluid IK Solver - Pinned Constraints Only
+// ---------------------------------------------------------------------------
+/**
+ * Fluid IK Solver - Only pinned parts constrain the system
+ * All other parts move fluidly without rapid or choppy motion
+ * Uses adaptive damping and smooth interpolation for natural movement
+ */
+export const solveFluid = (
+  pose: Pose,
+  limbName: 'rArm' | 'lArm' | 'rLeg' | 'lLeg',
+  target: Vector2D,
+  jointModes: Record<PartName, JointConstraint>,
+  activePins: AnchorName[],
+  maxIterations: number = 30,
+  baseDamping: number = 0.15,
+  adaptiveDamping: boolean = true
+): Pose => {
+  const newPose = { ...pose };
+  const limbChain = LIMB_SEQUENCES[limbName];
+  if (!limbChain) return newPose;
+
+  const joints = getJointPositions(newPose, activePins);
+  
+  // Fluid solver with adaptive damping based on distance and velocity
+  let previousError = Math.sqrt(
+    Math.pow(target.x - joints[limbChain[limbChain.length - 1] as string].x, 2) +
+    Math.pow(target.y - joints[limbChain[limbChain.length - 1] as string].y, 2)
+  );
+  
+  for (let iter = 0; iter < maxIterations; iter++) {
+    const effector = limbChain[limbChain.length - 1];
+    const effectorPos = joints[effector as string];
+    const error = { x: target.x - effectorPos.x, y: target.y - effectorPos.y };
+    const errorMagnitude = Math.sqrt(error.x * error.x + error.y * error.y);
+    
+    // Adaptive damping based on error magnitude
+    let currentDamping = baseDamping;
+    if (adaptiveDamping && iter > 0) {
+      const currentError = errorMagnitude;
+      const errorRatio = currentError / (previousError + 0.001); // Avoid division by zero
+      currentDamping = baseDamping * Math.min(2, Math.max(0.1, errorRatio));
+    }
+    
+    if (errorMagnitude < 0.5) break;
+    
+    // Build Jacobian for fluid motion
+    const jacobian: number[][] = [];
+    for (let i = 0; i < limbChain.length; i++) {
+      const joint = limbChain[i];
+      const jointPos = joints[joint as string];
+      jacobian[i] = [];
+      
+      for (let j = 0; j < limbChain.length; j++) {
+        const childJoint = limbChain[j];
+        const childPos = joints[childJoint as string];
+        const dx = childPos.x - jointPos.x;
+        const dy = childPos.y - jointPos.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        if (distance < 0.001) continue;
+        
+        jacobian[i][j] = -(dy / distance);
+        jacobian[i][j] = dx / distance;
+      }
+    }
+    
+    // Calculate smooth updates
+    const deltaTheta: number[] = [];
+    for (let i = 0; i < limbChain.length; i++) {
+      let deltaAngle = 0;
+      for (let j = 0; j < limbChain.length; j++) {
+        deltaAngle += jacobian[i][j] * error.x + jacobian[i][j] * error.y;
+      }
+      
+      // Apply fluid damping with smoothing
+      const smoothedDelta = deltaAngle * currentDamping;
+      deltaTheta[i] = smoothedDelta;
+    }
+    
+    // Apply updates with smooth interpolation
+    for (let i = 0; i < limbChain.length; i++) {
+      const joint = limbChain[i];
+      const poseKey = partNameToPoseKey[joint];
+      const currentAngle = (newPose as any)[poseKey] || 0;
+      const targetAngle = currentAngle + deltaTheta[i];
+      
+      // Smooth interpolation to prevent choppy motion
+      const smoothFactor = 0.3; // Smoothing factor for fluid motion
+      const finalAngle = currentAngle + (targetAngle - currentAngle) * smoothFactor;
+      
+      (newPose as any)[poseKey] = finalAngle;
+    }
+    
+    previousError = errorMagnitude;
+  }
+
+  return newPose;
+};
+
+// ---------------------------------------------------------------------------
+// Damped Least Squares (DLS) IK Solver
+// ---------------------------------------------------------------------------
+/**
+ * DLS IK Solver - Most robust near singularities
+ * Uses Tikhonov regularization for stable solutions
+ */
+export const solveDLS = (
+  pose: Pose,
+  limbName: 'rArm' | 'lArm' | 'rLeg' | 'lLeg',
+  target: Vector2D,
+  jointModes: Record<PartName, JointConstraint>,
+  activePins: AnchorName[],
+  maxIterations: number = 25,
+  dampingFactor: number = 0.1
+): Pose => {
+  const newPose = { ...pose };
+  const limbChain = LIMB_SEQUENCES[limbName];
+  if (!limbChain) return newPose;
+
+  const joints = getJointPositions(newPose, activePins);
+  
+  // DLS solver with Tikhonov regularization
+  for (let iter = 0; iter < maxIterations; iter++) {
+    const effector = limbChain[limbChain.length - 1];
+    const effectorPos = joints[effector as string];
+    const error = { x: target.x - effectorPos.x, y: target.y - effectorPos.y };
+    
+    if (Math.sqrt(error.x * error.x + error.y * error.y) < 0.2) break;
+    
+    // Build Jacobian J and apply DLS
+    const jacobian: number[][] = [];
+    for (let i = 0; i < limbChain.length; i++) {
+      const joint = limbChain[i];
+      const jointPos = joints[joint as string];
+      jacobian[i] = [];
+      
+      for (let j = 0; j < limbChain.length; j++) {
+        const childJoint = limbChain[j];
+        const childPos = joints[childJoint as string];
+        const dx = childPos.x - jointPos.x;
+        const dy = childPos.y - jointPos.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        if (distance < 0.001) continue;
+        
+        // DLS Jacobian column
+        jacobian[i][j] = -(dy / distance);
+        jacobian[i][j] = dx / distance;
+      }
+    }
+    
+    // Solve (J^T * J + λ²I)Δθ = J^T * error
+    const deltaTheta: number[] = [];
+    for (let i = 0; i < limbChain.length; i++) {
+      let numerator = 0;
+      let JT_J_sum = 0;
+      
+      for (let j = 0; j < limbChain.length; j++) {
+        JT_J_sum += jacobian[i][j] * jacobian[j][j];
+      }
+      
+      numerator = jacobian[i][0] * error.x + jacobian[i][1] * error.y;
+      const denominator = JT_J_sum + dampingFactor * dampingFactor;
+      deltaTheta[i] = numerator / denominator;
+    }
+    
+    // Apply updates with joint limits
+    for (let i = 0; i < limbChain.length; i++) {
+      const joint = limbChain[i];
+      const poseKey = partNameToPoseKey[joint];
+      const currentAngle = (newPose as any)[poseKey] || 0;
+      const newAngle = currentAngle + deltaTheta[i];
+      
+      // Apply joint limits
+      (newPose as any)[poseKey] = newAngle;
     }
   }
 

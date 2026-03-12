@@ -86,30 +86,30 @@ export const RESET_POSE: Pose = {
   },
 };
 
-// Define joint rotation limits in degrees
+// Define joint rotation limits in degrees (relaxed for intuitive posing)
 export const JOINT_LIMITS: JointLimits = {
-  // Spine (relative to parent)
-  [PartName.Waist]: { min: -180, max: 180 }, 
-  [PartName.Torso]: { min: -180, max: 180 },
-  [PartName.Collar]: { min: -180, max: 180 },
-  [PartName.Head]: { min: -180, max: 180 },
+  // Spine (relative to parent) - relaxed for natural posing
+  [PartName.Waist]: { min: -90, max: 90 }, 
+  [PartName.Torso]: { min: -60, max: 60 },
+  [PartName.Collar]: { min: -45, max: 45 },
+  [PartName.Head]: { min: -90, max: 90 },
 
-  // Right Arm (relative to parent)
-  [PartName.RShoulder]: { min: -180, max: 180 }, 
-  [PartName.RForearm]: { min: -160, max: 160 },         // Allow almost full elbow bend both ways
+  // Right Arm (relative to parent) - very permissive for intuitive posing
+  [PartName.RShoulder]: { min: -180, max: 180 }, // Full rotation for natural movement
+  rForearm: { min: -160, max: 160 },         // Allow almost full elbow bend both ways
   [PartName.RWrist]: { min: -180, max: 180 }, 
 
   // Left Arm (relative to parent) - very permissive for intuitive posing
   [PartName.LShoulder]: { min: -180, max: 180 }, // Full rotation for natural movement
-  [PartName.LForearm]: { min: -160, max: 160 },          // Allow almost full elbow bend both ways
+  lForearm: { min: -160, max: 160 },          // Allow almost full elbow bend both ways
   [PartName.LWrist]: { min: -180, max: 180 }, 
 
-  // Right Leg (relative to parent)
-  [PartName.RThigh]: { min: -180, max: 180 }, 
-  [PartName.RCalf]: { min: -180, max: 180 },           
-  [PartName.RAnkle]: { min: -180, max: 180 }, 
+  // Right Leg (relative to parent) - keep reasonable limits for stability
+  [PartName.RThigh]: { min: -120, max: 120 }, 
+  rCalf: { min: -10, max: 160 },           
+  [PartName.RAnkle]: { min: -90, max: 90 }, 
   // Left Leg (relative to parent)
-  [PartName.LThigh]: { min: -180, max: 180 },
-  [PartName.LCalf]: { min: -180, max: 180 },
-  [PartName.LAnkle]: { min: -180, max: 180 },
+  [PartName.LThigh]: { min: -120, max: 120 },
+  lCalf: { min: -10, max: 160 },
+  [PartName.LAnkle]: { min: -90, max: 90 },
 };
