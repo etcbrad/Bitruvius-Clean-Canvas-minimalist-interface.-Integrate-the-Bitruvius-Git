@@ -26,6 +26,7 @@ interface EnhancedTimelineProps {
   onIKToggle: () => void;
   onAutoInterpolationToggle: () => void;
   onExitPoseView: () => void;
+  onCaptureSlot: (label: 'A' | 'B' | 'C') => void;
 }
 
 export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
@@ -50,7 +51,8 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
   onSmoothToggle,
   onIKToggle,
   onAutoInterpolationToggle,
-  onExitPoseView
+  onExitPoseView,
+  onCaptureSlot
 }) => {
   const [expandedTransitions, setExpandedTransitions] = useState<Record<string, boolean>>({});
   const [draggedSlot, setDraggedSlot] = useState<number | null>(null);
@@ -223,6 +225,27 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
             }`}
           >
             Poses
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={() => onCaptureSlot('A')}
+            className="px-3 py-1 border rounded text-xs bg-white/10 border-white/20 text-white/70 hover:bg-white/20 transition-colors"
+          >
+            Capture A
+          </button>
+          <button
+            onClick={() => onCaptureSlot('B')}
+            className="px-3 py-1 border rounded text-xs bg-white/10 border-white/20 text-white/70 hover:bg-white/20 transition-colors"
+          >
+            Capture B
+          </button>
+          <button
+            onClick={() => onCaptureSlot('C')}
+            className="px-3 py-1 border rounded text-xs bg-white/10 border-white/20 text-white/70 hover:bg-white/20 transition-colors"
+          >
+            Capture C
           </button>
         </div>
 
