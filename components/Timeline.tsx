@@ -84,16 +84,7 @@ export const Timeline: React.FC<TimelineProps> = ({
     return `${(ms / 1000).toFixed(1)}s`;
   };
 
-  const getEasingIcon = (easing: EasingFunction) => {
-    const icons = {
-      linear: '━',
-      'ease-in': '╰',
-      'ease-out': '╭',
-      'ease-in-out': '╮',
-      spring: '〰️'
-    };
-    return icons[easing] || '━';
-  };
+  const getEasingLabel = (easing: EasingFunction) => easing.replace('-', ' ');
 
   return (
     <div className="bg-black/30 backdrop-blur-md border border-white/10 rounded-lg p-4 space-y-4">
@@ -103,7 +94,7 @@ export const Timeline: React.FC<TimelineProps> = ({
           onClick={sequence.isPlaying ? onPause : onPlay}
           className="px-3 py-2 bg-accent-purple/30 border border-accent-purple text-white rounded hover:bg-accent-purple/50 transition-colors"
         >
-          {sequence.isPlaying ? '⏸️ Pause' : '▶️ Play'}
+          {sequence.isPlaying ? 'Pause' : 'Play'}
         </button>
         <button
           onClick={onStop}
@@ -119,13 +110,13 @@ export const Timeline: React.FC<TimelineProps> = ({
               : 'bg-white/10 border-white/20 text-white/70 hover:bg-white/20'
           }`}
         >
-          🔁 Loop: {sequence.loop ? 'ON' : 'OFF'}
+          Loop: {sequence.loop ? 'ON' : 'OFF'}
         </button>
         <button
           onClick={onAddSlot}
           className="px-3 py-2 bg-accent-green/30 border border-accent-green text-white rounded hover:bg-accent-green/50 transition-colors"
         >
-          ➕ Add Slot
+          Add Slot
         </button>
       </div>
 
@@ -139,7 +130,7 @@ export const Timeline: React.FC<TimelineProps> = ({
               : 'bg-white/10 border-white/20 text-white/70 hover:bg-white/20'
           }`}
         >
-          🎭 Easing: {sequence.easingEnabled ? 'ON' : 'OFF'}
+          Easing: {sequence.easingEnabled ? 'ON' : 'OFF'}
         </button>
         <button
           onClick={onSmoothToggle}
@@ -149,7 +140,7 @@ export const Timeline: React.FC<TimelineProps> = ({
               : 'bg-white/10 border-white/20 text-white/70 hover:bg-white/20'
           }`}
         >
-          〰️ Smooth: {sequence.smoothTransitions ? 'ON' : 'OFF'}
+          Smooth: {sequence.smoothTransitions ? 'ON' : 'OFF'}
         </button>
         <button
           onClick={onIKToggle}
@@ -159,7 +150,7 @@ export const Timeline: React.FC<TimelineProps> = ({
               : 'bg-white/10 border-white/20 text-white/70 hover:bg-white/20'
           }`}
         >
-          🦾 IK Assist: {sequence.ikAssisted ? 'ON' : 'OFF'}
+          IK Assist: {sequence.ikAssisted ? 'ON' : 'OFF'}
         </button>
       </div>
 
@@ -184,7 +175,7 @@ export const Timeline: React.FC<TimelineProps> = ({
               className="absolute inset-0 w-full h-2 opacity-0 cursor-pointer"
             />
           </div>
-          <span className="text-white/70 text-xs">100% ▶</span>
+          <span className="text-white/70 text-xs">100%</span>
         </div>
         <div className="text-center text-white/50 text-xs">
           {formatDuration(sequence.currentTimeMs)} / {formatDuration(totalDuration)}
@@ -262,9 +253,8 @@ export const Timeline: React.FC<TimelineProps> = ({
                   onClick={() => toggleTransitionExpansion(slot.id)}
                   className="flex items-center gap-2 w-full p-1 text-left text-white/50 hover:text-white text-xs"
                 >
-                  <span className="text-lg">{getEasingIcon(slot.easing)}</span>
                   <span>{formatDuration(slot.durationToNext)}</span>
-                  <span className="text-white/30">{slot.easing}</span>
+                  <span className="text-white/30">{getEasingLabel(slot.easing)}</span>
                   <span className="ml-auto">{expandedTransitions[slot.id] ? '▼' : '▶'}</span>
                 </button>
                 

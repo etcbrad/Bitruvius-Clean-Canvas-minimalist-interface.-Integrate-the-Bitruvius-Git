@@ -49,9 +49,9 @@ export const useKinematics = (initialPose: Pose): [KinematicsState, KinematicsAc
       const currentMode = prev[part];
       let nextMode: JointConstraint;
       if (currentMode === 'fk') {
-        nextMode = 'stretch';
-      } else if (currentMode === 'stretch') {
-        nextMode = 'curl';
+        nextMode = 'offset';
+      } else if (currentMode === 'offset') {
+        nextMode = 'match';
       } else {
         nextMode = 'fk';
       }

@@ -11,6 +11,13 @@ interface AdvancedGridProps {
 
 interface SystemGuidesProps {
   floorY: number;
+  groundMode: 'gradient' | 'black' | 'white' | 'transparent' | 'perspective';
+  groundPattern: 'none' | 'hatch' | 'stippling' | 'dither';
+  perspective?: {
+    lines: number;
+    spacing: number;
+    convergence: number;
+  };
 }
 
 export const Scanlines: React.FC = () => (
@@ -69,9 +76,10 @@ export const AdvancedGrid: React.FC<AdvancedGridProps> = ({ origin, gridSize, vi
   return <g className="pointer-events-none">{lines}</g>;
 };
 
-export const SystemGuides: React.FC<SystemGuidesProps> = ({ floorY }) => {
+export const SystemGuides: React.FC<SystemGuidesProps> = ({ floorY, groundMode, groundPattern, perspective }) => {
   const guideColor = 'rgba(80, 80, 80, 0.25)'; // Changed to darker monochrome rgba
   const span = 2000; // Extend guide lines far beyond typical viewport
+  const groundColor = groundMode === 'white' ? '#ffffff' : '#000000';
 
   return (
     <g className="pointer-events-none">
@@ -80,20 +88,87 @@ export const SystemGuides: React.FC<SystemGuidesProps> = ({ floorY }) => {
       {/* Center Y-axis guide */}
       <line x1="0" y1={-span} x2="0" y2={span} stroke={guideColor} strokeWidth="1" opacity="0.3" strokeDasharray="10 5" />
 
-      {/* Floor guide line and ground strip, always visible as AirMode is removed */}
+      {/* Floor guide line and ground strip */}
+      {groundMode !== 'transparent' && (
         <g style={{ transition: 'all 0.2s ease-in-out' }}>
+          <defs>
+            <linearGradient id="ground-fade" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={groundColor} stopOpacity="0.9" />
+              <stop offset="100%" stopColor={groundColor} stopOpacity="0" />
+            </linearGradient>
+            <pattern id="ground-hatch" patternUnits="userSpaceOnUse" width="12" height="12" patternTransform="rotate(45)">
+              <line x1="0" y1="0" x2="0" y2="12" stroke={groundColor} strokeWidth="1" opacity="0.25" />
+            </pattern>
+            <pattern id="ground-stipple" patternUnits="userSpaceOnUse" width="10" height="10">
+              <circle cx="2" cy="2" r="1.4" fill={groundColor} opacity="0.25" />
+              <circle cx="7" cy="6" r="1.2" fill={groundColor} opacity="0.2" />
+            </pattern>
+            <pattern id="ground-dither" patternUnits="userSpaceOnUse" width="4" height="4">
+              <circle cx="1" cy="1" r="0.7" fill={groundColor} opacity="0.2" />
+              <circle cx="3" cy="3" r="0.7" fill={groundColor} opacity="0.2" />
+            </pattern>
+          </defs>
           {/* Main floor guide line */}
-          <line x1={-span} y1={floorY} x2={span} y2={floorY} stroke={guideColor} strokeWidth={1} opacity="0.9" />
-          {/* Darker ground strip at the floor level */}
-          <rect
-            x={-ANATOMY.FOOT / 2}
-            y={floorY}
-            width={ANATOMY.FOOT}
-            height={GROUND_STRIP_HEIGHT}
-            fill={GROUND_STRIP_COLOR}
-            opacity="0.9"
+          <line
+            x1={-span}
+            y1={floorY}
+            x2={span}
+            y2={floorY}
+            stroke={groundColor}
+            strokeWidth={1}
+            opacity={groundMode === 'gradient' ? 0.9 : 1}
           />
+          {/* Ground strip */}
+          <rect
+            x={-span}
+            y={floorY}
+            width={span * 2}
+            height={GROUND_STRIP_HEIGHT}
+            fill={groundMode === 'gradient' ? 'url(#ground-fade)' : groundColor}
+            opacity={groundMode === 'gradient' ? 1 : 0.8}
+          />
+          {groundPattern !== 'none' && (
+            <rect
+              x={-span}
+              y={floorY}
+              width={span * 2}
+              height={GROUND_STRIP_HEIGHT}
+              fill={
+                groundPattern === 'hatch'
+                  ? 'url(#ground-hatch)'
+                  : groundPattern === 'stippling'
+                    ? 'url(#ground-stipple)'
+                    : 'url(#ground-dither)'
+              }
+              opacity={0.9}
+            />
+          )}
+          {groundMode === 'perspective' && (
+            <g>
+              {Array.from({ length: perspective?.lines ?? 10 }).map((_, index) => {
+                const spacing = perspective?.spacing ?? 40;
+                const convergence = perspective?.convergence ?? 0.85;
+                const t = index + 1;
+                const y = floorY + t * spacing * Math.pow(convergence, t - 1);
+                const widthScale = Math.max(0.1, Math.pow(convergence, t));
+                const lineOpacity = Math.max(0, 0.5 - t * 0.03);
+                return (
+                  <line
+                    key={`persp-${index}`}
+                    x1={-span * widthScale}
+                    y1={y}
+                    x2={span * widthScale}
+                    y2={y}
+                    stroke={groundColor}
+                    strokeWidth={1}
+                    opacity={lineOpacity}
+                  />
+                );
+              })}
+            </g>
+          )}
         </g>
+      )}
     </g>
   );
 };

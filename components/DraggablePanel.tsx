@@ -77,8 +77,12 @@ export const DraggablePanel: React.FC<DraggablePanelProps> = ({
     if (!isDragging) return;
     
     // Fix: Corrected `offset.clientY` to `offset.current.y`
-    let newX = e.clientX - offset.current.x;
-    let newY = e.clientY - offset.current.y;
+    const offsetParent = panelRef.current?.offsetParent as HTMLElement | null;
+    const scrollLeft = offsetParent?.scrollLeft || 0;
+    const scrollTop = offsetParent?.scrollTop || 0;
+
+    let newX = e.clientX - offset.current.x + scrollLeft;
+    let newY = e.clientY - offset.current.y + scrollTop;
 
     const panelWidth = panelRef.current?.offsetWidth || 0;
     const panelHeight = panelRef.current?.offsetHeight || 0;

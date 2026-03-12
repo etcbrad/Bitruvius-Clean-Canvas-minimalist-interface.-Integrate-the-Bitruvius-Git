@@ -15,6 +15,7 @@ interface EnhancedTimelineProps {
   onSlotDelete: (slotId: string) => void;
   onSlotReorder: (fromIndex: number, toIndex: number) => void;
   onTransitionUpdate: (slotId: string, duration: number, easing: EasingFunction) => void;
+  onSlotLabelUpdate: (slotId: string, label: string) => void;
   onPlay: () => void;
   onPause: () => void;
   onStop: () => void;
@@ -65,6 +66,10 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
     setDraggedSlot(index);
   };
 
+  const handleSlotDragEnd = () => {
+    setDraggedSlot(null);
+  };
+
   const handleSlotDragOver = (e: React.DragEvent) => {
     e.preventDefault();
   };
@@ -90,8 +95,10 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
   };
 
   const saveLabel = (slotId: string) => {
-    if (editingLabel.trim().length > 0) {
-      onSlotLabelUpdate(slotId, editingLabel.trim());
+    const trimmedLabel = editingLabel.trim();
+    if (trimmedLabel.length > 0) {
+      // Call the parent callback to persist the label change
+      onSlotLabelUpdate?.(slotId, trimmedLabel);
     }
     setEditingSlot(null);
     setEditingLabel('');
@@ -101,6 +108,7 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
     const slot = sequence.slots.find(s => s.id === slotId);
     if (slot) {
       setPoseString(poseToString(slot.pose));
+      setEditingSlot(slot);
       setPoseEditMode(true);
     }
   };
@@ -121,15 +129,8 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
     return `${(ms / 1000).toFixed(1)}s`;
   };
 
-  const getEasingIcon = (easing: EasingFunction) => {
-    const icons = {
-      linear: '━',
-      'ease-in': '╰',
-      'ease-out': '╭',
-      'ease-in-out': '╮',
-      spring: '〰️'
-    };
-    return icons[easing] || '━';
+  const getEasingLabel = (easing: EasingFunction) => {
+    return easing.replace('-', ' ');
   };
 
   // Pose Viewer Component
@@ -221,7 +222,7 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
                 : 'text-white/50 hover:text-white'
             }`}
           >
-            🎭 Poses
+            Poses
           </button>
         </div>
 
@@ -234,7 +235,7 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
                 onClick={sequence.isPlaying ? onPause : onPlay}
                 className="px-3 py-2 bg-accent-purple/30 border border-accent-purple text-white rounded hover:bg-accent-purple/50 transition-colors"
               >
-                {sequence.isPlaying ? '⏸️ Pause' : '▶️ Play'}
+                {sequence.isPlaying ? 'Pause' : 'Play'}
               </button>
               <button
                 onClick={onStop}
@@ -250,13 +251,13 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
                     : 'bg-white/10 border-white/20 text-white/70 hover:bg-white/20'
                 }`}
               >
-                🔁 Loop: {sequence.loop ? 'ON' : 'OFF'}
+                Loop: {sequence.loop ? 'ON' : 'OFF'}
               </button>
               <button
                 onClick={onAddSlot}
                 className="px-3 py-2 bg-accent-green/30 border border-accent-green text-white rounded hover:bg-accent-green/50 transition-colors"
               >
-                ➕ Add Slot
+                Add Slot
               </button>
             </div>
 
@@ -272,7 +273,7 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
                       : 'bg-white/10 border-white/20 text-white/70 hover:bg-white/20'
                   }`}
                 >
-                  🎭 Easing: {sequence.easingEnabled ? 'ON' : 'OFF'}
+                  Easing: {sequence.easingEnabled ? 'ON' : 'OFF'}
                 </button>
                 <button
                   onClick={onSmoothToggle}
@@ -282,7 +283,7 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
                       : 'bg-white/10 border-white/20 text-white/70 hover:bg-white/20'
                   }`}
                 >
-                  〰️ Smooth: {sequence.smoothTransitions ? 'ON' : 'OFF'}
+                  Smooth: {sequence.smoothTransitions ? 'ON' : 'OFF'}
                 </button>
                 <button
                   onClick={onIKToggle}
@@ -292,7 +293,7 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
                       : 'bg-white/10 border-white/20 text-white/70 hover:bg-white/20'
                   }`}
                 >
-                  🦾 IK Assist: {sequence.ikAssisted ? 'ON' : 'OFF'}
+                  IK Assist: {sequence.ikAssisted ? 'ON' : 'OFF'}
                 </button>
                 <button
                   onClick={onAutoInterpolationToggle}
@@ -328,7 +329,7 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
                     className="absolute inset-0 w-full h-2 opacity-0 cursor-pointer"
                   />
                 </div>
-                <span className="text-white/70 text-xs">100% ▶</span>
+                <span className="text-white/70 text-xs">100%</span>
               </div>
               <div className="text-center text-white/50 text-xs">
                 {formatDuration(sequence.currentTimeMs)} / {formatDuration(totalDuration)}
@@ -346,6 +347,7 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
                     onDragStart={() => handleSlotDragStart(index)}
                     onDragOver={handleSlotDragOver}
                     onDrop={(e) => handleSlotDrop(e, index)}
+                    onDragEnd={handleSlotDragEnd}
                     className={`flex items-center gap-2 p-2 bg-white/5 border rounded cursor-move transition-all ${
                       draggedSlot === index ? 'opacity-50 border-accent-purple' : 
                       selectedSlotId === slot.id ? 'border-accent-purple bg-accent-purple/10' : 
@@ -409,9 +411,8 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
                         onClick={() => toggleTransitionExpansion(slot.id)}
                         className="flex items-center gap-2 w-full p-1 text-left text-white/50 hover:text-white text-xs"
                       >
-                        <span className="text-lg">{getEasingIcon(slot.easing)}</span>
-                        <span>{formatDuration(slot.durationToNext)}</span>
-                        <span className="text-white/30">{slot.easing}</span>
+                  <span>{formatDuration(slot.durationToNext)}</span>
+                  <span className="text-white/30">{getEasingLabel(slot.easing)}</span>
                         <span className="ml-auto">{expandedTransitions[slot.id] ? '▼' : '▶'}</span>
                       </button>
                       
@@ -492,7 +493,7 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
                         className="text-white/50 hover:text-white text-xs p-1"
                         title="Edit pose data"
                       >
-                        🔧
+                        Edit
                       </button>
                       <button
                         onClick={(e) => {
@@ -502,12 +503,11 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
                         className="text-white/50 hover:text-white text-xs p-1"
                         title="Update from current pose"
                       >
-                        📥
+                        Update
                       </button>
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          const slot = sequence.slots.find(s => s.id === slot.id);
                           if (slot) {
                             navigator.clipboard.writeText(poseToString(slot.pose));
                           }
@@ -515,7 +515,7 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
                         className="text-white/50 hover:text-white text-xs p-1"
                         title="Copy pose string"
                       >
-                        📋
+                        Copy
                       </button>
                     </div>
                   </div>

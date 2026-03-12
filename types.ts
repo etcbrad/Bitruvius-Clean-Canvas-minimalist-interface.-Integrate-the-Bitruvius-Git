@@ -111,16 +111,52 @@ export type PinnedState = {
 };
 
 // Defines the available kinetic constraint modes for joints.
-// Re-introduced 'stretch' and 'curl' as per user request.
-export type JointConstraint = 'fk' | 'stretch' | 'curl';
+// 'offset' and 'match' replace the prior 'stretch'/'curl' naming.
+export type JointConstraint = 'fk' | 'offset' | 'match';
 
 // Defines the rendering mode for the Bone component.
 // Simplified: 'grayscale' removed as UI is globally monochrome, 'silhouette' now represents solid black fill.
-export type RenderMode = 'default' | 'wireframe' | 'silhouette' | 'backlight'; // Added 'backlight'
+export type RenderMode =
+  | 'default'
+  | 'wireframe'
+  | 'silhouette'
+  | 'backlight'
+  | 'spotlight'
+  | 'shadow'
+  | 'grayscale'
+  | 'sepia'
+  | 'palette';
 
 export type ViewMode = 'zoomed' | 'default' | 'lotte' | 'wide' | 'mobile'; // Added 'mobile'
 
 export type KinematicMode = 'fk' | 'ik' | 'fabrik' | 'jacobian' | 'pim2' | 'dls' | 'fluid';
+export type BodyDragMode = 'rigid' | 'float' | 'space' | 'sling' | 'ragdoll' | 'tether';
+
+export type WalkingEngineGait = {
+  intensity: number;
+  stride: number;
+  lean: number;
+  frequency: number;
+  gravity: number;
+  bounce: number;
+  bends: number;
+  head_spin: number;
+  mood: number;
+  ground_drag: number;
+  foot_angle_on_ground: number;
+  arm_swing: number;
+  elbow_bend: number;
+  wrist_swing: number;
+  foot_roll: number;
+  toe_lift: number;
+  shin_tilt: number;
+  foot_slide: number;
+  kick_up_force: number;
+  hover_height: number;
+  waist_twist: number;
+  hip_sway: number;
+  toe_bend: number;
+};
 
 export type AnimationKeyframe = {
   id: string;
@@ -134,6 +170,43 @@ export type AnimationState = {
   currentFrameIndex: number;
   loop: boolean;
 };
+
+// New Animation System Types (for clean separation)
+export interface AnimationFrame {
+  id: string;
+  timestamp: number;
+  pose: Pose;
+  metadata?: {
+    label?: string;
+    ease?: EasingFunction;
+    duration?: number;
+    notes?: string;
+  };
+}
+
+export interface ActionGroup {
+  id: string;
+  name: string;
+  startTime: number;
+  endTime: number;
+  frameIds: string[];
+  color?: string;
+  metadata?: {
+    description?: string;
+    tags?: string[];
+  };
+}
+
+export interface AnimationClip {
+  id: string;
+  name: string;
+  frames: AnimationFrame[];
+  groups: ActionGroup[];
+  totalDuration: number;
+  loop: boolean;
+  created: number;
+  modified: number;
+}
 
 // Unified Sequence Engine Types
 export type EasingFunction = 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'spring';
@@ -177,3 +250,52 @@ export type SavedPose = {
 export type JointLimits = {
   [key: string]: { min: number; max: number };
 };
+
+export type ImageFitMode = 'free' | 'contain' | 'cover';
+
+export interface ImageLayerState {
+  src: string | null;
+  visible: boolean;
+  opacity: number; // 0..1
+  x: number; // 0..100 (percent)
+  y: number; // 0..100 (percent)
+  scale: number; // 10..400 (%)
+  fitMode?: ImageFitMode;
+  blendMode?: GlobalCompositeOperation;
+}
+
+export interface BodyPartMaskLayer {
+  src: string | null;
+  visible: boolean;
+  opacity: number; // 0..1
+  scale: number; // 10..400 (%)
+  rotationDeg?: number;
+  offsetX?: number;
+  offsetY?: number;
+  blendMode?: GlobalCompositeOperation;
+  boneAdjustEnabled?: boolean;
+  boneScaleLength?: number;
+  boneScaleWidth?: number;
+  boneVariant?: BoneVariant;
+  physicsMode?: MaskPhysicsMode;
+  balanceMode?: MaskBalanceMode;
+  counterTargets?: PartName[];
+  lockTargets?: PartName[];
+}
+
+export type BoneVariant =
+  | 'diamond'
+  | 'waist-teardrop-pointy-up'
+  | 'torso-teardrop-pointy-down'
+  | 'collar-horizontal-oval-shape'
+  | 'deltoid-shape'
+  | 'limb-tapered'
+  | 'head-tall-oval'
+  | 'hand-foot-arrowhead-shape'
+  | 'oval-limb'
+  | 'oval-torso'
+  | 'oval-waist'
+  | 'oval-hand-foot';
+
+export type MaskPhysicsMode = 'follow' | 'replace' | 'offset' | 'balance' | 'counter' | 'lock';
+export type MaskBalanceMode = 'x' | 'y' | 'slanted';

@@ -1,6 +1,7 @@
 import { ANATOMY, BASE_ROTATIONS, RIGGING, JOINT_LIMITS } from '../constants';
 import { Vector2D, Pose, PartName, AnchorName, JointConstraint, RenderMode, PARENT_MAP, CHILD_MAP, partNameToPoseKey, PinnedState, LIMB_SEQUENCES } from '../types';
 import { smoothTransition } from './sequenceEngine';
+import { safeDistance, safeAddVectors, safeClamp, isSafeNumber } from './safeMath';
 
 // Type for joint positions that includes both Vector2D positions and numeric angle fields
 type JointPositionsResult = Record<string, Vector2D | number>;
@@ -34,18 +35,14 @@ export const lerpAngleShortestPath = (a: number, b: number, t: number): number =
 
 const rad = (d: number): number => d * Math.PI / 180;
 const deg = (r: number): number => r * 180 / Math.PI;
-const dist = (v1: Vector2D, v2: Vector2D): number =>
-  Math.sqrt(Math.pow(v2.x - v1.x, 2) + Math.pow(v2.y - v1.y, 2));
+const dist = (v1: Vector2D, v2: Vector2D): number => safeDistance(v1, v2, 0);
 
 const rotateVec = (x: number, y: number, angleDeg: number): Vector2D => {
   const r = rad(angleDeg);
   return { x: x * Math.cos(r) - y * Math.sin(r), y: x * Math.sin(r) + y * Math.cos(r) };
 };
 
-const addVec = (v1: Vector2D, v2: Vector2D): Vector2D => ({
-  x: v1.x + v2.x,
-  y: v1.y + v2.y,
-});
+const addVec = (v1: Vector2D, v2: Vector2D): Vector2D => safeAddVectors(v1, v2, { x: 0, y: 0 });
 
 // ---------------------------------------------------------------------------
 // Rotation Helpers
@@ -287,7 +284,7 @@ const getLimbRootAngle = (
 };
 
 // ---------------------------------------------------------------------------
-// Kinetic Behavior Propagation (curl / stretch)
+// Kinetic Behavior Propagation (match / offset)
 // ---------------------------------------------------------------------------
 
 /**
@@ -295,8 +292,8 @@ const getLimbRootAngle = (
  * jointMode. Call this inside validateAndApplyPoseUpdate in App.tsx after writing
  * the new angle for the directly-manipulated part.
  *
- *   - stretch: child counter-rotates to maintain its world orientation
- *   - curl:    child rotates with the parent, exaggerating the fold
+ *   - offset: child counter-rotates to maintain its world orientation
+ *   - match:  child rotates with the parent, exaggerating the fold
  *   - fk:      no effect
  *
  * NOTE: This function was fully implemented in the original but never wired up.
@@ -337,10 +334,10 @@ export const applyKineticBehaviors = (
 
     const current = (newPose as any)[poseKey] || 0;
 
-    if (mode === 'stretch') {
+    if (mode === 'offset') {
       // Counter-rotate: child maintains world orientation
       (newPose as any)[poseKey] = current - (angleDelta * resonance);
-    } else if (mode === 'curl') {
+    } else if (mode === 'match') {
       // Co-rotate: child folds with the parent
       (newPose as any)[poseKey] = current + (angleDelta * resonance);
     }
@@ -413,6 +410,7 @@ export const solveFABRIK = (
   const newPose = { ...pose };
   const chain = LIMB_SEQUENCES[limbName];
   if (!chain) return newPose;
+  const epsilon = 1e-6;
 
   // 1. Get current global positions and bone lengths
   // Use activePins to ensure we are solving in the correct world space
@@ -422,7 +420,8 @@ export const solveFABRIK = (
   // Add effector tip for better precision
   const effector = chain[chain.length - 1];
   const tipKey = effector === PartName.RAnkle ? 'rFootTip' : effector === PartName.LAnkle ? 'lFootTip' : effector === PartName.RWrist ? 'rHandTip' : 'lHandTip';
-  points.push({ ...joints[tipKey] });
+  const tipPoint = joints[tipKey] ?? points[points.length - 1];
+  points.push({ ...tipPoint });
 
   const originalLengths: number[] = [];
   for (let i = 0; i < points.length - 1; i++) {
@@ -433,10 +432,10 @@ export const solveFABRIK = (
   const totalLength = originalLengths.reduce((a, b) => a + b, 0);
   const targetDist = dist(origin, target);
 
-  // Check if any joint in the chain has 'stretch' mode
-  const hasStretch = chain.some(joint => jointModes[joint] === 'stretch');
+  // Check if any joint in the chain has 'offset' mode
+  const hasStretch = chain.some(joint => jointModes[joint] === 'offset');
 
-  // If target is out of reach AND we have stretch, we scale the lengths
+  // If target is out of reach AND we have offset, we scale the lengths
   let currentLengths = [...originalLengths];
   if (targetDist > totalLength && hasStretch) {
     const scale = targetDist / totalLength;
@@ -448,6 +447,7 @@ export const solveFABRIK = (
     // Standard out-of-reach behavior: extend fully
     for (let i = 0; i < points.length - 1; i++) {
       const r = dist(points[i], target);
+      if (r < epsilon) continue;
       const lambda = currentLengths[i] / r;
       points[i + 1] = {
         x: (1 - lambda) * points[i].x + lambda * target.x,
@@ -462,6 +462,7 @@ export const solveFABRIK = (
       points[points.length - 1] = { ...target };
       for (let i = points.length - 2; i >= 0; i--) {
         const r = dist(points[i + 1], points[i]);
+        if (r < epsilon) continue;
         const lambda = currentLengths[i] / r;
         points[i] = {
           x: (1 - lambda) * points[i + 1].x + lambda * points[i].x,
@@ -473,6 +474,7 @@ export const solveFABRIK = (
       points[0] = { ...origin };
       for (let i = 0; i < points.length - 1; i++) {
         const r = dist(points[i], points[i + 1]);
+        if (r < epsilon) continue;
         const lambda = currentLengths[i] / r;
         points[i + 1] = {
           x: (1 - lambda) * points[i].x + lambda * points[i + 1].x,
@@ -482,7 +484,7 @@ export const solveFABRIK = (
     }
   }
 
-  // 2. Convert points back to joint angles and update offsets if stretched
+  // 2. Convert points back to joint angles and update offsets if offset-mode
   // We solve angles sequentially from root to effector
   let currentParentAngle = 0;
   if (limbName === 'rArm' || limbName === 'lArm') {
@@ -508,12 +510,14 @@ export const solveFABRIK = (
     let localAngle = normalizedGlobalAngle - currentParentAngle - baseRot;
     localAngle = ((localAngle + 180) % 360 + 360) % 360 - 180;
 
-    (newPose as any)[poseKey] = localAngle;
+    const limits = JOINT_LIMITS[poseKey as keyof typeof JOINT_LIMITS];
+    const clampedAngle = limits ? Math.max(limits.min, Math.min(limits.max, localAngle)) : localAngle;
+    (newPose as any)[poseKey] = clampedAngle;
     currentParentAngle = normalizedGlobalAngle;
 
-    // If stretched, we need to handle the bone length change
+    // If offset-mode, we need to handle the bone length change
     // In our current system, bone lengths are fixed in ANATOMY.
-    // To "stretch", we would need to use offsets or dynamic ANATOMY.
+    // To "offset", we would need to use offsets or dynamic ANATOMY.
     // Bitruvius 0.2 uses offsets for "Elasticity".
     if (hasStretch) {
         const originalLen = originalLengths[i];
@@ -524,7 +528,7 @@ export const solveFABRIK = (
             // However, the next joint in the chain will be calculated from the previous one's end point.
             // This is complex with the current _calculateGlobalJointPositions.
             // For now, let's just solve the angles. 
-            // True "Stretch" (bone elongation) requires a more flexible rigging system.
+            // True "Offset" (bone elongation) requires a more flexible rigging system.
         }
     }
   }
@@ -596,7 +600,8 @@ export const solveIK = (
   pose: Pose,
   limbName: 'rArm' | 'lArm' | 'rLeg' | 'lLeg',
   target: Vector2D,
-  iterations: number = 10
+  iterations: number = 10,
+  activePins: AnchorName[] = []
 ): Pose => {
   const newPose = { ...pose };
   const chain = LIMB_SEQUENCES[limbName];
@@ -606,7 +611,7 @@ export const solveIK = (
   for (let i = 0; i < iterations; i++) {
     // Iterate from end of chain to start
     for (let j = chain.length - 1; j >= 0; j--) {
-      const joints = getJointPositions(newPose, []);
+      const joints = getJointPositions(newPose, activePins);
       const currentJoint = chain[j];
       const effector = chain[chain.length - 1];
 
@@ -648,45 +653,16 @@ export const solveJacobianTranspose = (
   jointModes: Record<PartName, JointConstraint>,
   activePins: AnchorName[],
   maxIterations: number = 20,
-  damping: number = 0.1,
-  stepSize: number = 0.5
+  damping: number = 0.12,
+  stepSize: number = 0.6
 ): Pose => {
   const newPose = { ...pose };
   const limbChain = LIMB_SEQUENCES[limbName];
   if (!limbChain) return newPose;
 
-  // Get current joint positions
-  const joints = getJointPositions(newPose, activePins);
-  
-  // Build Jacobian matrix J where J[i,j] = ∂p_i/∂θ_j
-  const jacobian: number[][] = [];
-  for (let i = 0; i < limbChain.length; i++) {
-    const joint = limbChain[i];
-    const jointPos = joints[joint as string];
-    const poseKey = partNameToPoseKey[joint];
-    const currentAngle = (pose as any)[poseKey] || 0;
-    
-    jacobian[i] = [];
-    for (let j = 0; j < limbChain.length; j++) {
-      const childJoint = limbChain[j];
-      const childPos = joints[childJoint as string];
-      
-      // Calculate partial derivative: ∂p_i/∂θ_j
-      const dx = childPos.x - jointPos.x;
-      const dy = childPos.y - jointPos.y;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      
-      if (distance < 0.001) continue;
-      
-      // For 2D planar chain, Jacobian column is perpendicular to joint->end vector
-      jacobian[i][j] = -(dy / distance);
-      jacobian[i][j] = dx / distance;
-    }
-  }
-
   // Iterative solver using Jacobian transpose
   for (let iter = 0; iter < maxIterations; iter++) {
-    // Calculate error vector
+    const joints = getJointPositions(newPose, activePins);
     const effector = limbChain[limbChain.length - 1];
     const effectorPos = joints[effector as string];
     const error = { x: target.x - effectorPos.x, y: target.y - effectorPos.y };
@@ -695,25 +671,15 @@ export const solveJacobianTranspose = (
     const errorMagnitude = Math.sqrt(error.x * error.x + error.y * error.y);
     if (errorMagnitude < 0.1) break;
     
-    // Calculate update: Δθ = J^T * error
-    const deltaAngles: number[] = [];
-    for (let i = 0; i < limbChain.length; i++) {
-      let deltaAngle = 0;
-      for (let j = 0; j < limbChain.length; j++) {
-        deltaAngle += jacobian[i][j] * error.x + jacobian[i][j] * error.y;
-      }
-      
-      // Apply damping and step size limits
-      const clampedDelta = Math.max(-stepSize, Math.min(stepSize, deltaAngle));
-      deltaAngles[i] = clampedDelta * damping;
-    }
-    
-    // Update pose
+    // Apply Jacobian transpose update
     for (let i = 0; i < limbChain.length; i++) {
       const joint = limbChain[i];
+      const jointPos = joints[joint as string];
       const poseKey = partNameToPoseKey[joint];
-      const currentAngle = (newPose as any)[poseKey] || 0;
-      (newPose as any)[poseKey] = currentAngle + deltaAngles[i];
+      const r = { x: effectorPos.x - jointPos.x, y: effectorPos.y - jointPos.y };
+      const gradient = (r.x * error.y - r.y * error.x);
+      const delta = Math.max(-stepSize, Math.min(stepSize, gradient * damping));
+      (newPose as any)[poseKey] = ((newPose as any)[poseKey] || 0) + delta;
     }
   }
 
@@ -736,80 +702,7 @@ export const solvePIM2 = (
   maxIterations: number = 15,
   lambda: number = 0.01
 ): Pose => {
-  const newPose = { ...pose };
-  const limbChain = LIMB_SEQUENCES[limbName];
-  if (!limbChain) return newPose;
-
-  const joints = getJointPositions(newPose, activePins);
-  
-  // Build Jacobian and apply PIM2
-  for (let iter = 0; iter < maxIterations; iter++) {
-    const effector = limbChain[limbChain.length - 1];
-    const effectorPos = joints[effector as string];
-    const error = { x: target.x - effectorPos.x, y: target.y - effectorPos.y };
-    
-    if (Math.sqrt(error.x * error.x + error.y * error.y) < 0.5) break;
-    
-    // PIM2 update with regularization
-    const jacobian: number[][] = [];
-    for (let i = 0; i < limbChain.length; i++) {
-      const joint = limbChain[i];
-      const jointPos = joints[joint as string];
-      jacobian[i] = [];
-      
-      for (let j = 0; j < limbChain.length; j++) {
-        const childJoint = limbChain[j];
-        const childPos = joints[childJoint as string];
-        const dx = childPos.x - jointPos.x;
-        const dy = childPos.y - jointPos.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        if (distance < 0.001) continue;
-        
-        // PIM2 Jacobian calculation
-        jacobian[i][j] = -(dy / distance);
-        jacobian[i][j] = dx / distance;
-      }
-    }
-    
-    // Calculate pseudo-inverse with damping
-    const JT_J: number[][] = [];
-    for (let i = 0; i < limbChain.length; i++) {
-      JT_J[i] = [];
-      for (let j = 0; j < limbChain.length; j++) {
-        let sum = 0;
-        for (let k = 0; k < limbChain.length; k++) {
-          sum += jacobian[i][k] * jacobian[k][j];
-        }
-        JT_J[i][j] = sum;
-      }
-    }
-    
-    // Solve for angle updates
-    const deltaTheta: number[] = [];
-    for (let i = 0; i < limbChain.length; i++) {
-      let numerator = 0;
-      for (let j = 0; j < limbChain.length; j++) {
-        numerator += JT_J[i][j] * error.x + JT_J[i][j] * error.y;
-      }
-      
-      const denominator = lambda * lambda + 1;
-      deltaTheta[i] = numerator / denominator;
-    }
-    
-    // Apply updates with joint limits
-    for (let i = 0; i < limbChain.length; i++) {
-      const joint = limbChain[i];
-      const poseKey = partNameToPoseKey[joint];
-      const currentAngle = (newPose as any)[poseKey] || 0;
-      const newAngle = currentAngle + deltaTheta[i];
-      
-      // Apply joint limits
-      (newPose as any)[poseKey] = newAngle;
-    }
-  }
-
-  return newPose;
+  return solveJacobianTranspose(pose, limbName, target, jointModes, activePins, maxIterations, 0.16, 0.8);
 };
 
 // ---------------------------------------------------------------------------
@@ -830,86 +723,8 @@ export const solveFluid = (
   baseDamping: number = 0.15,
   adaptiveDamping: boolean = true
 ): Pose => {
-  const newPose = { ...pose };
-  const limbChain = LIMB_SEQUENCES[limbName];
-  if (!limbChain) return newPose;
-
-  const joints = getJointPositions(newPose, activePins);
-  
-  // Fluid solver with adaptive damping based on distance and velocity
-  let previousError = Math.sqrt(
-    Math.pow(target.x - joints[limbChain[limbChain.length - 1] as string].x, 2) +
-    Math.pow(target.y - joints[limbChain[limbChain.length - 1] as string].y, 2)
-  );
-  
-  for (let iter = 0; iter < maxIterations; iter++) {
-    const effector = limbChain[limbChain.length - 1];
-    const effectorPos = joints[effector as string];
-    const error = { x: target.x - effectorPos.x, y: target.y - effectorPos.y };
-    const errorMagnitude = Math.sqrt(error.x * error.x + error.y * error.y);
-    
-    // Adaptive damping based on error magnitude
-    let currentDamping = baseDamping;
-    if (adaptiveDamping && iter > 0) {
-      const currentError = errorMagnitude;
-      const errorRatio = currentError / (previousError + 0.001); // Avoid division by zero
-      currentDamping = baseDamping * Math.min(2, Math.max(0.1, errorRatio));
-    }
-    
-    if (errorMagnitude < 0.5) break;
-    
-    // Build Jacobian for fluid motion
-    const jacobian: number[][] = [];
-    for (let i = 0; i < limbChain.length; i++) {
-      const joint = limbChain[i];
-      const jointPos = joints[joint as string];
-      jacobian[i] = [];
-      
-      for (let j = 0; j < limbChain.length; j++) {
-        const childJoint = limbChain[j];
-        const childPos = joints[childJoint as string];
-        const dx = childPos.x - jointPos.x;
-        const dy = childPos.y - jointPos.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        if (distance < 0.001) continue;
-        
-        jacobian[i][j] = -(dy / distance);
-        jacobian[i][j] = dx / distance;
-      }
-    }
-    
-    // Calculate smooth updates
-    const deltaTheta: number[] = [];
-    for (let i = 0; i < limbChain.length; i++) {
-      let deltaAngle = 0;
-      for (let j = 0; j < limbChain.length; j++) {
-        deltaAngle += jacobian[i][j] * error.x + jacobian[i][j] * error.y;
-      }
-      
-      // Apply fluid damping with smoothing
-      const smoothedDelta = deltaAngle * currentDamping;
-      deltaTheta[i] = smoothedDelta;
-    }
-    
-    // Apply updates with smooth interpolation
-    for (let i = 0; i < limbChain.length; i++) {
-      const joint = limbChain[i];
-      const poseKey = partNameToPoseKey[joint];
-      const currentAngle = (newPose as any)[poseKey] || 0;
-      const targetAngle = currentAngle + deltaTheta[i];
-      
-      // Smooth interpolation to prevent choppy motion
-      const smoothFactor = 0.3; // Smoothing factor for fluid motion
-      const finalAngle = currentAngle + (targetAngle - currentAngle) * smoothFactor;
-      
-      (newPose as any)[poseKey] = finalAngle;
-    }
-    
-    previousError = errorMagnitude;
-  }
-
-  return newPose;
+  const solved = solveJacobianTranspose(pose, limbName, target, jointModes, activePins, maxIterations, 0.1, 0.45);
+  return interpolatePoses(pose, solved, 0.35);
 };
 
 // ---------------------------------------------------------------------------
@@ -928,68 +743,5 @@ export const solveDLS = (
   maxIterations: number = 25,
   dampingFactor: number = 0.1
 ): Pose => {
-  const newPose = { ...pose };
-  const limbChain = LIMB_SEQUENCES[limbName];
-  if (!limbChain) return newPose;
-
-  const joints = getJointPositions(newPose, activePins);
-  
-  // DLS solver with Tikhonov regularization
-  for (let iter = 0; iter < maxIterations; iter++) {
-    const effector = limbChain[limbChain.length - 1];
-    const effectorPos = joints[effector as string];
-    const error = { x: target.x - effectorPos.x, y: target.y - effectorPos.y };
-    
-    if (Math.sqrt(error.x * error.x + error.y * error.y) < 0.2) break;
-    
-    // Build Jacobian J and apply DLS
-    const jacobian: number[][] = [];
-    for (let i = 0; i < limbChain.length; i++) {
-      const joint = limbChain[i];
-      const jointPos = joints[joint as string];
-      jacobian[i] = [];
-      
-      for (let j = 0; j < limbChain.length; j++) {
-        const childJoint = limbChain[j];
-        const childPos = joints[childJoint as string];
-        const dx = childPos.x - jointPos.x;
-        const dy = childPos.y - jointPos.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        if (distance < 0.001) continue;
-        
-        // DLS Jacobian column
-        jacobian[i][j] = -(dy / distance);
-        jacobian[i][j] = dx / distance;
-      }
-    }
-    
-    // Solve (J^T * J + λ²I)Δθ = J^T * error
-    const deltaTheta: number[] = [];
-    for (let i = 0; i < limbChain.length; i++) {
-      let numerator = 0;
-      let JT_J_sum = 0;
-      
-      for (let j = 0; j < limbChain.length; j++) {
-        JT_J_sum += jacobian[i][j] * jacobian[j][j];
-      }
-      
-      numerator = jacobian[i][0] * error.x + jacobian[i][1] * error.y;
-      const denominator = JT_J_sum + dampingFactor * dampingFactor;
-      deltaTheta[i] = numerator / denominator;
-    }
-    
-    // Apply updates with joint limits
-    for (let i = 0; i < limbChain.length; i++) {
-      const joint = limbChain[i];
-      const poseKey = partNameToPoseKey[joint];
-      const currentAngle = (newPose as any)[poseKey] || 0;
-      const newAngle = currentAngle + deltaTheta[i];
-      
-      // Apply joint limits
-      (newPose as any)[poseKey] = newAngle;
-    }
-  }
-
-  return newPose;
+  return solveJacobianTranspose(pose, limbName, target, jointModes, activePins, maxIterations, 0.22, 0.35);
 };

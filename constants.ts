@@ -64,22 +64,22 @@ export const BASE_ROTATIONS: RotationValues = {
   waist: 0,
   collar: 0,
   head: 0,
-  lShoulder: 0, // Changed from -90 to 0 for horizontal arms
-  lForearm: 0,
-  lWrist: 0,
-  rShoulder: 0, // Changed from 90 to 0 for horizontal arms
-  rForearm: 0,
-  rWrist: 0,
-  lThigh: 0,
+  lShoulder: 86.57, // Left shoulder rotation from user's T-pose
+  lForearm: 1.95,   // Left elbow rotation
+  lWrist: -61.5,    // Left wrist rotation
+  rShoulder: -94.88, // Right shoulder rotation from user's T-pose
+  rForearm: 3.32,    // Right elbow rotation
+  rWrist: 0,        // Normalized from 723.83° to 0° for proper T-pose
+  lThigh: 36.77,    // Left thigh rotation from user's T-pose
   lCalf: 0,
   lAnkle: 0,
-  rThigh: 0,
+  rThigh: 0,        // Right leg straight in T-pose
   rCalf: 0,
   rAnkle: 0,
 };
 
 export const RESET_POSE: Pose = {
-  root: { x: 0, y: T_POSE_ROOT_Y },
+  root: { x: 0, y: 2625 }, // User's provided T-pose root position
   ...BASE_ROTATIONS,
   offsets: {
     [PartName.Collar]: {x: 0, y: RIGGING.COLLAR_OFFSET_Y} // Apply default offset to collar

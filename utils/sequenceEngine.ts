@@ -1,5 +1,6 @@
 import { Pose, PoseSlot, SequenceState, EasingFunction, PartName, JointConstraint, AnchorName, Vector2D } from '../types';
-import { interpolatePoses, solveFABRIK, getJointPositions } from './kinematics';
+import { interpolatePoses, solveFABRIK, getJointPositions, lerp } from './kinematics';
+import { logWarning, logError, safeExecute } from './errorHandling';
 
 // Easing function implementations
 const easingFunctions = {
@@ -34,9 +35,58 @@ export const interpolatePosesWithIK = (
   t: number, 
   ikAssisted: boolean = false,
   ikStrength: number = 0.5,
-  jointModes: Record<PartName, JointConstraint> = {} as Record<PartName, JointConstraint>,
+  jointModes: Record<PartName, JointConstraint> = {},
   activePins: AnchorName[] = []
 ): Pose => {
+  // Runtime validation for type safety
+  const safeJointModes: Record<PartName, JointConstraint> = {};
+  Object.values(PartName).forEach(part => {
+    safeJointModes[part] = jointModes[part] || 'fk';
+  });
+
+  const safeActivePins: AnchorName[] = Array.isArray(activePins) 
+    ? activePins.filter(pin => 
+        Object.values(PartName).includes(pin as PartName) || 
+        ['root', 'lFootTip', 'rFootTip', 'lHandTip', 'rHandTip'].includes(pin)
+      )
+    : [];
+
+  // Validate inputs
+  if (!startPose || !endPose) {
+    logWarning('Invalid poses provided to interpolatePosesWithIK', {
+      operation: 'interpolatePosesWithIK',
+      additionalInfo: { startPose: !!startPose, endPose: !!endPose, t }
+    });
+    return endPose || startPose || {
+      root: { x: 0, y: 0 },
+      bodyRotation: 0,
+      torso: 0,
+      waist: 0,
+      collar: 0,
+      head: 0,
+      lShoulder: 0,
+      lForearm: 0,
+      lWrist: 0,
+      rShoulder: 0,
+      rForearm: 0,
+      rWrist: 0,
+      lThigh: 0,
+      lCalf: 0,
+      lAnkle: 0,
+      rThigh: 0,
+      rCalf: 0,
+      rAnkle: 0
+    };
+  }
+
+  if (t < 0 || t > 1) {
+    logWarning('Invalid interpolation parameter t', {
+      operation: 'interpolatePosesWithIK',
+      additionalInfo: { t, clampedTo: Math.max(0, Math.min(1, t)) }
+    });
+    t = Math.max(0, Math.min(1, t)); // Clamp to valid range
+  }
+  
   // Start with basic interpolation
   let interpolated = interpolatePoses(startPose, endPose, t);
   
@@ -53,26 +103,67 @@ export const interpolatePosesWithIK = (
     'lLeg': PartName.LAnkle
   };
   
+  let ikSuccessCount = 0;
+  let ikTotalCount = 0;
+  
   for (const limbName of limbs) {
     const endpoint = limbEndpoints[limbName];
     if (!endpoint) continue;
     
-    // Get target position from end pose
-    const endJoints = getJointPositions(endPose, activePins);
-    const targetPos = endJoints[endpoint];
+    ikTotalCount++;
     
-    if (!targetPos) continue;
-    
-    // Apply IK to find a more natural path
     try {
-      const ikPose = solveFABRIK(interpolated, limbName, targetPos, jointModes, activePins, 5, 0.5);
+      // Get target position from end pose
+      const endJoints = getJointPositions(endPose, safeActivePins);
+      const targetPos = endJoints[endpoint];
+      
+      if (!targetPos) {
+        console.warn(`No joint position found for ${endpoint}`);
+        continue;
+      }
+      
+      // Validate target position
+      if (!Number.isFinite(targetPos.x) || !Number.isFinite(targetPos.y)) {
+        console.warn(`Invalid target position for ${endpoint}:`, targetPos);
+        continue;
+      }
+      
+      // Apply IK to find a more natural path
+      const ikPose = solveFABRIK(interpolated, limbName, targetPos, safeJointModes, safeActivePins, 5, 0.5);
+      
+      // Validate IK result
+      if (!ikPose || typeof ikPose !== 'object') {
+        console.warn(`Invalid IK result for ${limbName}`);
+        continue;
+      }
       
       // Blend IK result with interpolated result
       const blend = ikStrength * t; // Stronger IK influence as we progress
-      interpolated = interpolatePoses(interpolated, ikPose, blend);
+      
+      // Create a safe blended pose
+      const blendedPose: Pose = { ...interpolated };
+      for (const [key, value] of Object.entries(ikPose)) {
+        if (key in interpolated && typeof value === 'number' && typeof (interpolated as any)[key] === 'number') {
+          const startValue = (interpolated as any)[key] as number;
+          const endValue = value as number;
+          blendedPose[key as keyof Pose] = lerp(startValue, endValue, blend) as any;
+        }
+      }
+      
+      interpolated = blendedPose;
+      ikSuccessCount++;
+      
     } catch (error) {
-      // Fallback to basic interpolation if IK fails
       console.warn(`IK assistance failed for ${limbName}:`, error);
+      // Continue with basic interpolation for this limb
+    }
+  }
+  
+  // Log IK performance for debugging
+  if (ikTotalCount > 0) {
+    const successRate = (ikSuccessCount / ikTotalCount) * 100;
+    if (successRate < 50) {
+      console.warn(`Low IK success rate: ${successRate.toFixed(1)}% (${ikSuccessCount}/${ikTotalCount})`);
     }
   }
   

@@ -29,9 +29,9 @@ export const COLORS = {
   RIDGE: "#333333", // For wireframe stroke - kept dark
   PIN_HIGHLIGHT: "#D1D5DB", // Changed from green to light monochrome for active pin
 
-  // Kinetic Colors - Reintroduced for visual feedback
-  GREEN_CURL: adjustBrightness("#A3E635", 0.6),    // Desaturated green for Curl
-  PURPLE_STRETCH: adjustBrightness("#8B7EC1", 0.8), // Desaturated purple for Stretch
+  // Kinetic Colors - Offset/Match halos
+  GREEN_CURL: adjustBrightness("#C8FF1A", 0.8),    // Greenish-yellow for Match
+  PURPLE_STRETCH: adjustBrightness("#8B7EC1", 0.85), // Purple for Offset
   
   // Categorical Colors - all default to a dark monochrome for the doll itself
   LIGHT_MONO_HEAD_HAND_FOOT: "#FFFFFF", // Changed to white as requested for head, hands, and feet
@@ -162,6 +162,7 @@ export const Bone: React.FC<BoneProps> = ({
     if (renderMode === 'wireframe') return 'none';
     if (renderMode === 'silhouette') return COLORS.DEFAULT_FILL; // Solid black fill for silhouette
     if (renderMode === 'backlight') return COLORS.DEFAULT_FILL; // Black fill for backlight mode
+    if (renderMode === 'shadow') return COLORS.DEFAULT_FILL;
 
     // Default mode: use categorical color, which is now monochrome.
     return fillOverride || partCategoryColor;
@@ -169,6 +170,7 @@ export const Bone: React.FC<BoneProps> = ({
 
   const pathOpacity = useMemo(() => {
     if (renderMode === 'backlight') return COLORS.BACKLIGHT_OPACITY;
+    if (renderMode === 'shadow') return 0.35;
     return 1; // Default to opaque
   }, [renderMode]);
 
@@ -177,6 +179,7 @@ export const Bone: React.FC<BoneProps> = ({
     
     if (renderMode === 'wireframe') return COLORS.RIDGE;
     if (renderMode === 'backlight') return COLORS.RIDGE; // Outline for backlight mode
+    if (renderMode === 'shadow') return 'none';
     
     // In silhouette mode, no stroke unless selected
     if (renderMode === 'silhouette') {
@@ -199,10 +202,22 @@ export const Bone: React.FC<BoneProps> = ({
     return 0; // Default behavior for 'default' mode (no stroke width by default)
   }, [isSelected, renderMode]);
 
+  const haloStroke = useMemo(() => {
+    if (renderMode === 'wireframe' || renderMode === 'shadow') return 'none';
+    if (jointConstraintMode === 'offset') return COLORS.PURPLE_STRETCH;
+    if (jointConstraintMode === 'match') return COLORS.GREEN_CURL;
+    return 'none';
+  }, [renderMode, jointConstraintMode]);
+
+  const haloStrokeWidth = useMemo(() => {
+    if (haloStroke === 'none') return 0;
+    return Math.max(6, width * 0.35);
+  }, [haloStroke, width]);
+
   const overlayLineStroke = useMemo(() => {
     if (renderMode === 'default' && showOverlay) {
-      if (jointConstraintMode === 'stretch') return COLORS.PURPLE_STRETCH;
-      if (jointConstraintMode === 'curl') return COLORS.GREEN_CURL;
+      if (jointConstraintMode === 'offset') return COLORS.PURPLE_STRETCH;
+      if (jointConstraintMode === 'match') return COLORS.GREEN_CURL;
     }
     // For backlight, use a distinct color for the axis lines to stand out
     if (renderMode === 'backlight') return COLORS.SELECTION;
@@ -228,6 +243,17 @@ export const Bone: React.FC<BoneProps> = ({
             paintOrder="stroke"
             opacity={pathOpacity}
           />
+          {haloStroke !== 'none' && (
+            <path
+              d={getBonePath(length, width, variant, drawsUpwards)}
+              fill="none"
+              stroke={haloStroke}
+              strokeWidth={haloStrokeWidth}
+              opacity={0.35}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+          )}
           {/* Overlay line for axis, only in default mode, now with kinetic color */}
           {showOverlay && renderMode !== 'wireframe' && ( // Show overlay in default, backlight, silhouette, but not wireframe
             <line x1="0" y1="0" x2="0" y2={visualEndPoint} stroke={overlayLineStroke} strokeWidth={1} opacity={0.5} strokeLinecap="round" />
