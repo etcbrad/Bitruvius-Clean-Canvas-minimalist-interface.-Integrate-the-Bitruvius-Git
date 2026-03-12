@@ -129,7 +129,8 @@ export type RenderMode =
 
 export type ViewMode = 'zoomed' | 'default' | 'lotte' | 'wide' | 'mobile'; // Added 'mobile'
 
-export type KinematicMode = 'fk' | 'ik' | 'fabrik' | 'jacobian' | 'pim2' | 'dls' | 'fluid';
+// Keep the kinematic system lightweight and consistent: FABRIK is the single IK solver.
+export type KinematicMode = 'fk' | 'fabrik';
 export type BodyDragMode = 'rigid' | 'float' | 'space' | 'sling' | 'ragdoll' | 'tether';
 
 export type WalkingEngineGait = {

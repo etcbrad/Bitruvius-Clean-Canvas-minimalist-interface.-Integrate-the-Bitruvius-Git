@@ -35,14 +35,14 @@ export const interpolatePosesWithIK = (
   t: number, 
   ikAssisted: boolean = false,
   ikStrength: number = 0.5,
-  jointModes: Record<PartName, JointConstraint> = {},
+  jointModes: Partial<Record<PartName, JointConstraint>> = {},
   activePins: AnchorName[] = []
 ): Pose => {
   // Runtime validation for type safety
-  const safeJointModes: Record<PartName, JointConstraint> = {};
-  Object.values(PartName).forEach(part => {
-    safeJointModes[part] = jointModes[part] || 'fk';
-  });
+  const safeJointModes = Object.values(PartName).reduce((acc, part) => {
+    acc[part] = jointModes[part] || 'fk';
+    return acc;
+  }, {} as Record<PartName, JointConstraint>);
 
   const safeActivePins: AnchorName[] = Array.isArray(activePins) 
     ? activePins.filter(pin => 
@@ -193,6 +193,13 @@ export const getPoseAtTime = (sequence: SequenceState, timeMs: number): Pose => 
     const currentSlot = sequence.slots[i];
     const nextSlot = sequence.slots[i + 1];
     const segmentDuration = currentSlot.durationToNext;
+
+    if (segmentDuration <= 0) {
+      if (adjustedTime <= elapsed) {
+        return nextSlot.pose;
+      }
+      continue;
+    }
     
     if (adjustedTime <= elapsed + segmentDuration) {
       let localT = (adjustedTime - elapsed) / segmentDuration;

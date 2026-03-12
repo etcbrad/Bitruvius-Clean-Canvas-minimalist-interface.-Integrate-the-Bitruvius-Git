@@ -29,8 +29,7 @@ export const useKinematics = (initialPose: Pose): [KinematicsState, KinematicsAc
 
   const cycleKinematicMode = useCallback(() => {
     setKinematicMode(prev => {
-      if (prev === 'fk') return 'ik';
-      if (prev === 'ik') return 'fabrik';
+      if (prev === 'fk') return 'fabrik';
       return 'fk';
     });
   }, []);

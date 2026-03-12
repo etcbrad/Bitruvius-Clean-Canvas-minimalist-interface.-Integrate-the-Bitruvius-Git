@@ -1,8 +1,8 @@
 
 import React, { useState, useRef, useMemo, useCallback, useEffect } from 'react';
-import { Pose, PartName, PartSelection, PartVisibility, AnchorName, partNameToPoseKey, PARENT_MAP, JointConstraint, RenderMode, Vector2D, ViewMode, AnimationState, AnimationKeyframe, SavedPose, KinematicMode, BodyDragMode, WalkingEngineGait, ImageLayerState, BodyPartMaskLayer, BoneVariant, MaskPhysicsMode, MaskBalanceMode } from './types';
+import { Pose, PartName, PART_NAMES, PartSelection, PartVisibility, AnchorName, partNameToPoseKey, PARENT_MAP, JointConstraint, RenderMode, Vector2D, ViewMode, AnimationState, AnimationKeyframe, SavedPose, KinematicMode, BodyDragMode, WalkingEngineGait, ImageLayerState, BodyPartMaskLayer, BoneVariant, MaskPhysicsMode, MaskBalanceMode, ImageFitMode } from './types';
 import { RESET_POSE, FLOOR_HEIGHT, JOINT_LIMITS, ANATOMY, GROUND_STRIP_HEIGHT } from './constants'; 
-import { getJointPositions, getShortestAngleDiffDeg, interpolatePoses, solveIK, solveAdvancedIK, solveFABRIK, solveJacobianTranspose, solvePIM2, solveDLS, solveFluid, lerp } from './utils/kinematics';
+import { getJointPositions, getShortestAngleDiffDeg, interpolatePoses, solveFABRIK, lerp, applyKineticBehaviors, getTotalRotation } from './utils/kinematics';
 import { Scanlines, SystemGuides } from './components/SystemGrid';
 import { Mannequin, getPartCategory, getPartCategoryDisplayName } from './components/Mannequin'; 
 import { DraggablePanel } from './components/DraggablePanel';
@@ -281,25 +281,12 @@ const App: React.FC = () => {
     else if (pinName === PartName.LAnkle || pinName === 'lFootTip') limb = 'lLeg';
 
     if (limb) {
-      let solvedPose: Pose;
+      let solvedPose = activePose;
 
-      if (kinematicMode === 'fk') {
-        solvedPose = activePose;
-      } else if (kinematicMode === 'ik') {
-        solvedPose = solveIK(activePose, limb, targetPos, 10);
-      } else if (kinematicMode === 'fabrik') {
-        solvedPose = solveFABRIK(activePose, limb, targetPos, jointModes, activePins);
-      } else if (kinematicMode === 'jacobian') {
-        solvedPose = solveJacobianTranspose(activePose, limb, targetPos, jointModes, activePins);
-      } else if (kinematicMode === 'pim2') {
-        solvedPose = solvePIM2(activePose, limb, targetPos, jointModes, activePins);
-      } else if (kinematicMode === 'dls') {
-        solvedPose = solveDLS(activePose, limb, targetPos, jointModes, activePins);
-      } else if (kinematicMode === 'fluid') {
-        solvedPose = solveFluid(activePose, limb, targetPos, jointModes, activePins);
-      } else {
+      if (kinematicMode !== 'fk') {
         solvedPose = solveFABRIK(activePose, limb, targetPos, jointModes, activePins);
       }
+
       setGhostPose(solvedPose);
     }
   }, [activePose, jointModes, activePins, kinematicMode]);
@@ -330,20 +317,8 @@ const App: React.FC = () => {
     limb: 'rArm' | 'lArm' | 'rLeg' | 'lLeg',
     target: Vector2D
   ) => {
-    if (bodyDragMode === 'float' || bodyDragMode === 'space') {
-      return solveFluid(pose, limb, target, jointModes, activePins);
-    }
-    if (bodyDragMode === 'ragdoll') {
-      return solveDLS(pose, limb, target, jointModes, activePins);
-    }
-    if (bodyDragMode === 'sling') {
-      return solveJacobianTranspose(pose, limb, target, jointModes, activePins);
-    }
-    if (bodyDragMode === 'tether') {
-      return solvePIM2(pose, limb, target, jointModes, activePins);
-    }
     return solveFABRIK(pose, limb, target, jointModes, activePins);
-  }, [activePins, bodyDragMode, jointModes]);
+  }, [activePins, jointModes]);
 
   const solvePinnedLimbsForBodyDrag = useCallback((pose: Pose) => {
     const targets = getPinnedLimbTargets();
@@ -506,6 +481,16 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
   const [walkingGait, setWalkingGait] = useState<WalkingEngineGait>(WALKING_PRESETS[0].gait);
   const [walkingSpeed, setWalkingSpeed] = useState(1);
   const [showCalibrationPanel, setShowCalibrationPanel] = useState(false);
+  const [systemLogs, setSystemLogs] = useState<Array<{ timestamp: string; message: string }>>([]);
+
+  const addLog = useCallback((message: string) => {
+    const timestamp = new Date().toLocaleTimeString();
+    setSystemLogs(prev => [...prev.slice(-99), { timestamp, message }]);
+  }, []);
+
+  useEffect(() => {
+    addLog('[SYSTEM]: BOOT SEQUENCE COMPLETE');
+  }, [addLog]);
 
   // Hook for drag state management
   const [dragState, dragActions] = useDragState();
@@ -518,12 +503,24 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
   }, []);
 
   const cycleBodyDragMode = useCallback(() => {
-    // Add body drag mode cycling logic here if needed
-  }, []);
+    const modes: BodyDragMode[] = ['rigid', 'float', 'space', 'sling', 'ragdoll', 'tether'];
+    setBodyDragMode(prev => {
+      const idx = modes.indexOf(prev);
+      const next = modes[(idx + 1) % modes.length];
+      addLog(`[SYSTEM]: BODY DRAG -> ${next.toUpperCase()}`);
+      return next;
+    });
+  }, [addLog]);
 
   const cycleBodyDragWeightiness = useCallback(() => {
-    // Add body drag weightiness cycling logic here if needed  
-  }, []);
+    const weights = [0, 0.35, 0.7];
+    setBodyDragWeightiness(prev => {
+      const idx = weights.findIndex(value => Math.abs(value - prev) < 0.05);
+      const next = weights[(idx + 1) % weights.length];
+      addLog(`[SYSTEM]: DRAG WEIGHT -> ${Math.round(next * 100)}%`);
+      return next;
+    });
+  }, [addLog]);
 
   const cycleWalkingPreset = useCallback(() => {
     setWalkingPresetIndex(prev => {
@@ -539,104 +536,16 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
     });
   }, []);
 
-  const saveWalkingLoopToTimeline = useCallback(() => {
-    const gait = walkingGaitRef.current;
-    const basePose = walkingEnabled ? walkingBasePoseRef.current : activePose;
-    const depth = clampNumber(gaitDepth / 100, 0, 1);
-    const phases = [0, Math.PI / 2, Math.PI, (Math.PI * 3) / 2];
-    const durationToNext = 350;
-    const slots = phases.map((phase, index) => ({
-      id: `WALK-${Date.now()}-${index}`,
-      label: `W${index + 1}`,
-      pose: buildWalkingPose(phase, basePose, gait, depth),
-      durationToNext: index === phases.length - 1 ? 0 : durationToNext,
-      easing: 'ease-in-out' as const,
-      autoGenerated: false,
-    }));
-
-    sequenceActions.setSequence({
-      slots,
-      loop: true,
-      isPlaying: false,
-      scrubPosition: 0,
-      currentTimeMs: 0,
-      easingEnabled: true,
-      smoothTransitions: true,
-      ikAssisted: false,
-    });
-  }, [buildWalkingPose, gaitDepth, sequenceActions, walkingEnabled, activePose]);
-
-  const handleBackgroundUploadInput = useCallback(() => {
-    backgroundUploadInputRef.current?.click();
-  }, []);
-
-  const handleForegroundUploadInput = useCallback(() => {
-    foregroundUploadInputRef.current?.click();
-  }, []);
-
-  const handleBodyPartMaskUploadInput = useCallback(() => {
-    bodyPartMaskUploadInputRef.current?.click();
-  }, []);
-
   const dockHeight = 800;
 
-  const handleClearBackgroundImageLayer = useCallback(() => {
-    setBackgroundImageLayer(DEFAULT_IMAGE_LAYER);
-  }, []);
-
-  const handlePatchBackgroundImageLayer = useCallback((patch: any) => {
-    setBackgroundImageLayer(prev => ({ ...prev, ...patch }));
-  }, []);
-
-  const handleClearForegroundImageLayer = useCallback(() => {
-    setForegroundImageLayer(DEFAULT_IMAGE_LAYER);
-  }, []);
-
-  const handlePatchForegroundImageLayer = useCallback((patch: any) => {
-    setForegroundImageLayer(prev => ({ ...prev, ...patch }));
-  }, []);
-
-  const handleClearBodyPartMaskLayer = useCallback(() => {
-    // Add mask clear logic here if needed
-  }, []);
-
-  const handlePatchBodyPartMaskLayer = useCallback((patch: any) => {
-    // Add mask patch logic here if needed
-  }, []);
-
-  const loadedMaskCount = 0;
-  const orderedParts = Object.values(PartName);
-
-  const openBackgroundUpload = useCallback(() => {
-    backgroundUploadInputRef.current?.click();
-  }, []);
-
-  const openForegroundUpload = useCallback(() => {
-    foregroundUploadInputRef.current?.click();
-  }, []);
-
-  const openBodyPartMaskUpload = useCallback(() => {
-    bodyPartMaskUploadInputRef.current?.click();
-  }, []);
-
-  const selectedBoneScale = { length: 1, width: 1 };
-
-  const handlePatchJointOffset = useCallback(() => {
-    // Add joint offset patch logic here if needed
-  }, []);
-
-  const maskHandles = [];
-
-  const jointPositions = useMemo(() => getJointPositions(activePose, []), [activePose]);
-
-  const applyBoneScalePatch = useCallback((prev: any, part: PartName, scale: any) => {
-    return { ...prev, [part]: scale };
-  }, []);
+  const jointPositions = useMemo(() => getJointPositions(activePose, activePins), [activePose, activePins]);
   const [showSystemTab, setShowSystemTab] = useState(false);
   const [smartPinning, setSmartPinning] = useState(false);
   const [bodySyncMode, setBodySyncMode] = useState(false);
   const [omniSyncMode, setOmniSyncMode] = useState(false);
   const [panelsVisible, setPanelsVisible] = useState(true);
+  const [showCommandLog, setShowCommandLog] = useState(false);
+  const [showPoseData, setShowPoseData] = useState(true);
   const [characterEditMode, setCharacterEditMode] = useState(false);
   const [globalBoneScale, setGlobalBoneScale] = useState({ length: 1.0, width: 1.0 });
   const [boneScale, setBoneScale] = useState<Record<PartName, { length: number; width: number }>>(() => (
@@ -650,6 +559,79 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
   const [foregroundImageLayer, setForegroundImageLayer] = useState<ImageLayerState>(DEFAULT_IMAGE_LAYER);
   const [bodyPartMaskLayers, setBodyPartMaskLayers] = useState<Record<PartName, BodyPartMaskLayer>>({});
   const [maskControlsVisible, setMaskControlsVisible] = useState(false);
+
+  const primarySelectedPart = useMemo(() => {
+    return (Object.entries(selectedParts).find(([p, sel]) => sel)?.[0]) as PartName | undefined;
+  }, [selectedParts]);
+
+  const selectedRotation = useMemo(() => {
+    if (!primarySelectedPart) return 0;
+    const key = partNameToPoseKey[primarySelectedPart];
+    return (activePose as any)[key] || 0;
+  }, [activePose, primarySelectedPart]);
+
+  const selectedPartLabel = useMemo(() => {
+    return primarySelectedPart ? getPartCategoryDisplayName(primarySelectedPart) : 'NONE';
+  }, [primarySelectedPart]);
+
+  const currentPartRotation = useMemo(() => {
+    if (!primarySelectedPart) return 0;
+    const key = partNameToPoseKey[primarySelectedPart];
+    return getTotalRotation(key, activePose);
+  }, [activePose, primarySelectedPart]);
+
+  const parentPartRotation = useMemo(() => {
+    if (!primarySelectedPart) return 0;
+    const parent = PARENT_MAP[primarySelectedPart];
+    if (!parent) return 0;
+    const parentKey = partNameToPoseKey[parent];
+    return getTotalRotation(parentKey, activePose);
+  }, [activePose, primarySelectedPart]);
+
+  const cycleSelectedPart = useCallback((direction: number) => {
+    if (PART_NAMES.length === 0) return;
+    const current = primarySelectedPart ?? PartName.Waist;
+    const idx = PART_NAMES.indexOf(current);
+    const nextIndex = (idx + direction + PART_NAMES.length) % PART_NAMES.length;
+    const nextPart = PART_NAMES[nextIndex];
+    setSelectedParts(prev => {
+      const nextSelection = { ...prev };
+      Object.keys(nextSelection).forEach(key => {
+        nextSelection[key as PartName] = false;
+      });
+      nextSelection[nextPart] = true;
+      return nextSelection;
+    });
+  }, [primarySelectedPart]);
+
+  const applyRotationDelta = useCallback((part: PartName | null, delta: number) => {
+    if (!part) return;
+    const key = partNameToPoseKey[part];
+    const limits = JOINT_LIMITS[key];
+    const apply = (pose: Pose) => {
+      const current = (pose as any)[key] || 0;
+      let nextVal = current + delta;
+      if (limits) {
+        nextVal = clampNumber(nextVal, limits.min, limits.max);
+      }
+      return { ...pose, [key]: nextVal };
+    };
+    setGhostPose(prev => apply(prev));
+    setActivePose(prev => apply(prev));
+  }, []);
+
+  const cycleSelectedJointMode = useCallback(() => {
+    if (!primarySelectedPart) return;
+    setJointModes(prev => {
+      const currentMode = prev[primarySelectedPart];
+      let nextMode: JointConstraint;
+      if (currentMode === 'fk') nextMode = 'offset';
+      else if (currentMode === 'offset') nextMode = 'match';
+      else nextMode = 'fk';
+      return { ...prev, [primarySelectedPart]: nextMode };
+    });
+  }, [primarySelectedPart]);
+
   const [activeMaskEditorPart, setActiveMaskEditorPart] = useState<PartName | null>(null);
   const [maskUploadTarget, setMaskUploadTarget] = useState<PartName | null>(null);
   const backgroundObjectUrlRef = useRef<string | null>(null);
@@ -658,6 +640,183 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
   const backgroundUploadInputRef = useRef<HTMLInputElement>(null);
   const foregroundUploadInputRef = useRef<HTMLInputElement>(null);
   const bodyPartMaskUploadInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!maskControlsVisible) return;
+    if (!activeMaskEditorPart && primarySelectedPart) {
+      setActiveMaskEditorPart(primarySelectedPart);
+    }
+  }, [maskControlsVisible, activeMaskEditorPart, primarySelectedPart]);
+
+  useEffect(() => {
+    return () => {
+      if (backgroundObjectUrlRef.current) {
+        URL.revokeObjectURL(backgroundObjectUrlRef.current);
+      }
+      if (foregroundObjectUrlRef.current) {
+        URL.revokeObjectURL(foregroundObjectUrlRef.current);
+      }
+      Object.values(bodyPartMaskObjectUrlRef.current).forEach(url => {
+        if (typeof url === 'string') {
+          URL.revokeObjectURL(url);
+        }
+      });
+    };
+  }, []);
+
+  const handleClearBackgroundImageLayer = useCallback(() => {
+    if (backgroundObjectUrlRef.current) {
+      URL.revokeObjectURL(backgroundObjectUrlRef.current);
+      backgroundObjectUrlRef.current = null;
+    }
+    setBackgroundImageLayer(DEFAULT_IMAGE_LAYER);
+    addLog('[LAYER]: BACKGROUND CLEARED');
+  }, [addLog]);
+
+  const handleRemoveBackgroundImageSource = useCallback(() => {
+    if (backgroundObjectUrlRef.current) {
+      URL.revokeObjectURL(backgroundObjectUrlRef.current);
+      backgroundObjectUrlRef.current = null;
+    }
+    setBackgroundImageLayer(prev => ({ ...prev, src: null, visible: false }));
+    addLog('[LAYER]: BACKGROUND SOURCE REMOVED');
+  }, [addLog]);
+
+  const handlePatchBackgroundImageLayer = useCallback((patch: any) => {
+    setBackgroundImageLayer(prev => ({ ...prev, ...patch }));
+  }, []);
+
+  const handleClearForegroundImageLayer = useCallback(() => {
+    if (foregroundObjectUrlRef.current) {
+      URL.revokeObjectURL(foregroundObjectUrlRef.current);
+      foregroundObjectUrlRef.current = null;
+    }
+    setForegroundImageLayer(DEFAULT_IMAGE_LAYER);
+    addLog('[LAYER]: FOREGROUND CLEARED');
+  }, [addLog]);
+
+  const handleRemoveForegroundImageSource = useCallback(() => {
+    if (foregroundObjectUrlRef.current) {
+      URL.revokeObjectURL(foregroundObjectUrlRef.current);
+      foregroundObjectUrlRef.current = null;
+    }
+    setForegroundImageLayer(prev => ({ ...prev, src: null, visible: false }));
+    addLog('[LAYER]: FOREGROUND SOURCE REMOVED');
+  }, [addLog]);
+
+  const handlePatchForegroundImageLayer = useCallback((patch: any) => {
+    setForegroundImageLayer(prev => ({ ...prev, ...patch }));
+  }, []);
+
+  const handleClearBodyPartMaskLayer = useCallback((partOverride?: PartName) => {
+    const target = partOverride ?? activeMaskEditorPart ?? primarySelectedPart ?? null;
+    if (!target) return;
+    const existingUrl = bodyPartMaskObjectUrlRef.current[target];
+    if (existingUrl) {
+      URL.revokeObjectURL(existingUrl);
+      delete bodyPartMaskObjectUrlRef.current[target];
+    }
+    setBodyPartMaskLayers(prev => ({
+      ...prev,
+      [target]: { ...DEFAULT_BODY_PART_MASK_LAYER, src: null, visible: false }
+    }));
+    addLog(`[LAYER]: CLEARED ${target.toUpperCase()}`);
+  }, [activeMaskEditorPart, primarySelectedPart, addLog]);
+  }, [activeMaskEditorPart, primarySelectedPart, addLog]);[MASK]: CLEARED ${target.toUpperCase()}`);
+  }, [activeMaskEditorPart, primarySelectedPart, addLog]);
+
+  const handlePatchBodyPartMaskLayer = useCallback((patch: Partial<BodyPartMaskLayer>, partOverride?: PartName) => {
+    const target = partOverride ?? activeMaskEditorPart;
+    if (!target) return;
+    setBodyPartMaskLayers(prev => ({
+      ...prev,
+      [target]: { ...DEFAULT_BODY_PART_MASK_LAYER, ...(prev[target] ?? {}), ...patch }
+    }));
+  }, [activeMaskEditorPart]);
+
+  const loadedMaskCount = useMemo(() => {
+    return (Object.values(bodyPartMaskLayers) as BodyPartMaskLayer[]).filter(layer => layer?.src).length;
+  }, [bodyPartMaskLayers]);
+  const orderedParts = Object.values(PartName);
+
+  const openBackgroundUpload = useCallback(() => {
+    backgroundUploadInputRef.current?.click();
+  }, []);
+
+  const openForegroundUpload = useCallback(() => {
+    foregroundUploadInputRef.current?.click();
+  }, []);
+
+  const openBodyPartMaskUpload = useCallback(() => {
+    const target = activeMaskEditorPart ?? primarySelectedPart ?? null;
+    if (!target) {
+      addLog('[MASK]: SELECT A PART BEFORE UPLOAD');
+      return;
+    }
+    setMaskUploadTarget(target);
+    bodyPartMaskUploadInputRef.current?.click();
+  }, [activeMaskEditorPart, primarySelectedPart, addLog]);
+
+  const handleBackgroundFileChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (backgroundObjectUrlRef.current) {
+      URL.revokeObjectURL(backgroundObjectUrlRef.current);
+    }
+    const url = URL.createObjectURL(file);
+    backgroundObjectUrlRef.current = url;
+    setBackgroundImageLayer(prev => ({
+      ...prev,
+      src: url,
+      visible: true,
+    }));
+    addLog(`[LAYER]: BACKGROUND LOADED (${file.name})`);
+    event.currentTarget.value = '';
+  }, [addLog]);
+
+  const handleForegroundFileChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (foregroundObjectUrlRef.current) {
+      URL.revokeObjectURL(foregroundObjectUrlRef.current);
+    }
+    const url = URL.createObjectURL(file);
+    foregroundObjectUrlRef.current = url;
+    setForegroundImageLayer(prev => ({
+      ...prev,
+      src: url,
+      visible: true,
+    }));
+    addLog(`[LAYER]: FOREGROUND LOADED (${file.name})`);
+    event.currentTarget.value = '';
+  }, [addLog]);
+
+  const handleMaskFileChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const target = maskUploadTarget ?? activeMaskEditorPart ?? primarySelectedPart ?? null;
+    if (!target) return;
+
+    const existingUrl = bodyPartMaskObjectUrlRef.current[target];
+    if (existingUrl) {
+      URL.revokeObjectURL(existingUrl);
+    }
+    const url = URL.createObjectURL(file);
+    bodyPartMaskObjectUrlRef.current[target] = url;
+
+    setBodyPartMaskLayers(prev => ({
+      ...prev,
+      [target]: {
+        ...DEFAULT_BODY_PART_MASK_LAYER,
+        ...(prev[target] ?? {}),
+        src: url,
+        visible: true,
+      }
+    }));
+    addLog(`[MASK]: LOADED ${target.toUpperCase()} (${file.name})`);
+    setMaskUploadTarget(null);
+    event.currentTarget.value = '';
+  }, [maskUploadTarget, activeMaskEditorPart, primarySelectedPart, addLog]);
 
   const walkingBasePoseRef = useRef<Pose>(RESET_POSE);
   const walkingPhaseRef = useRef(0);
@@ -802,6 +961,33 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
     return nextPose;
   }, []);
 
+  const saveWalkingLoopToTimeline = useCallback(() => {
+    const gait = walkingGaitRef.current;
+    const basePose = walkingEnabled ? walkingBasePoseRef.current : activePose;
+    const depth = clampNumber(gaitDepth / 100, 0, 1);
+    const phases = [0, Math.PI / 2, Math.PI, (Math.PI * 3) / 2];
+    const durationToNext = 350;
+    const slots = phases.map((phase, index) => ({
+      id: `WALK-${Date.now()}-${index}`,
+      label: `W${index + 1}`,
+      pose: buildWalkingPose(phase, basePose, gait, depth),
+      durationToNext: index === phases.length - 1 ? 0 : durationToNext,
+      easing: 'ease-in-out' as const,
+      autoGenerated: false,
+    }));
+
+    sequenceActions.setSequence({
+      slots,
+      loop: true,
+      isPlaying: false,
+      scrubPosition: 0,
+      currentTimeMs: 0,
+      easingEnabled: true,
+      smoothTransitions: true,
+      ikAssisted: false,
+    });
+  }, [buildWalkingPose, gaitDepth, sequenceActions, walkingEnabled, activePose]);
+
   const applyWalkingFootLocks = useCallback((
     pose: Pose,
     phase: number,
@@ -906,16 +1092,16 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
 
     const postRootJoints = getJointPositions(nextPose, ['root']);
     if (lockRef.left.active && postRootJoints.lFootTip) {
-      const solve = solveIK(nextPose, 'lLeg', lockRef.left.pos, 6, [PartName.Waist]);
+      const solve = solveFABRIK(nextPose, 'lLeg', lockRef.left.pos, jointModes, [PartName.Waist]);
       nextPose = blendLegPose(nextPose, solve, [PartName.LThigh, PartName.LSkin, PartName.LAnkle], clampNumber(lockRef.left.blend * 0.85, 0, 1));
     }
     if (lockRef.right.active && postRootJoints.rFootTip) {
-      const solve = solveIK(nextPose, 'rLeg', lockRef.right.pos, 6, [PartName.Waist]);
+      const solve = solveFABRIK(nextPose, 'rLeg', lockRef.right.pos, jointModes, [PartName.Waist]);
       nextPose = blendLegPose(nextPose, solve, [PartName.RThigh, PartName.RSkin, PartName.RAnkle], clampNumber(lockRef.right.blend * 0.85, 0, 1));
     }
 
     return nextPose;
-  }, []);
+  }, [jointModes]);
 
   const computeWalkingPose = useCallback((timeMs: number) => {
     const gait = walkingGaitRef.current;
@@ -988,8 +1174,10 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
   const [panelZIndices, setPanelZIndices] = useState<Record<string, number>>({
     'model-settings-panel': 101,
     'movement-settings-panel': 102,
+    'command-log-panel': 103,
+    'pose-data-terminal-panel': 104,
   });
-  const nextZIndex = useRef<number>(103);
+  const nextZIndex = useRef<number>(105);
 
   const bringPanelToFront = useCallback((id: string) => {
     setPanelZIndices(prev => {
@@ -1000,10 +1188,20 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
   }, []);
 
   // --- Panel Position/Size Management for the settings panels ---
-  const [panelRects, setPanelRects] = useState<Record<string, PanelRect>>({
-    'model-settings-panel': { id: 'model-settings-panel', x: 0, y: 0, width: DOCK_WIDTH, height: 700, minimized: false },
-    'movement-settings-panel': { id: 'movement-settings-panel', x: 0, y: 0, width: DOCK_WIDTH, height: 600, minimized: true },
-  });
+  const getInitialPanelRects = () => {
+    const rightX = typeof window !== 'undefined'
+      ? Math.max(16, window.innerWidth - DOCK_WIDTH - 16)
+      : 16;
+    const topY = 56;
+    return {
+      'model-settings-panel': { id: 'model-settings-panel', x: rightX, y: topY, width: DOCK_WIDTH, height: 700, minimized: false },
+      'movement-settings-panel': { id: 'movement-settings-panel', x: rightX, y: topY + 380, width: DOCK_WIDTH, height: 620, minimized: true },
+      'command-log-panel': { id: 'command-log-panel', x: 16, y: topY + 220, width: 260, height: 240, minimized: true },
+      'pose-data-terminal-panel': { id: 'pose-data-terminal-panel', x: Math.max(16, rightX - 300), y: topY + 420, width: 280, height: 260, minimized: true },
+    };
+  };
+
+  const [panelRects, setPanelRects] = useState<Record<string, PanelRect>>(getInitialPanelRects);
 
   const updatePanelRect = useCallback((id: string, newRect: Omit<PanelRect, 'x' | 'y'>) => {
     setPanelRects(prev => {
@@ -1043,14 +1241,6 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
   };
 
   // --- End Panel Position/Size Management ---
-  const addLog = useCallback((message: string) => {
-    const timestamp = new Date().toLocaleTimeString();
-    setSystemLogs(prev => [...prev.slice(-49), { timestamp, message }]);
-  }, []);
-
-  useEffect(() => {
-    addLog('[SYSTEM]: BOOT SEQUENCE COMPLETE');
-  }, [addLog]);
 
   // Dynamically calculate viewBox based on viewMode and windowSize
   const autoViewBox = useMemo(() => {
@@ -1111,7 +1301,7 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
     
     // 1. Check Pin Immovability (Softened by Elasticity)
     // In Bitruvius 0.2, pins are elastic, but we still have a "Hard Stop" threshold
-    const HARD_STOP_THRESHOLD = 300; // Maximum stretch before hard stop
+    const HARD_STOP_THRESHOLD = 300; // Maximum pin drift before hard stop
 
     for (const pinName of activePins) {
       const targetPos = pinnedState[pinName];
@@ -1186,6 +1376,21 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
             });
           }
 
+          if (partBeingDirectlyManipulated) {
+            const poseKey = partNameToPoseKey[partBeingDirectlyManipulated];
+            const prevVal = (prev as any)[poseKey] || 0;
+            const nextVal = (tentativeNextPose as any)[poseKey] || 0;
+            const delta = nextVal - prevVal;
+            if (Math.abs(delta) > 0.0001) {
+              tentativeNextPose = applyKineticBehaviors(
+                tentativeNextPose,
+                partBeingDirectlyManipulated,
+                delta,
+                jointModes,
+              );
+            }
+          }
+
           if (!isValidMove(
               tentativeNextPose,
               prev,
@@ -1206,7 +1411,7 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
 
           return tentativeNextPose;
       });
-  }, [activePins, pinnedState, isAirMode, isCraneDragging, isValidMove]);
+  }, [activePins, pinnedState, isAirMode, isCraneDragging, isValidMove, jointModes]);
 
   const poseComparisonKeys: (keyof Pose)[] = [
     'bodyRotation', 'torso', 'waist', 'collar', 'head',
@@ -1362,11 +1567,9 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
       const currentMode = prev[part];
       let nextMode: JointConstraint;
       if (currentMode === 'fk') {
-        nextMode = 'stretch';
-      } else if (currentMode === 'stretch') {
-        nextMode = 'curl';
-      } else if (currentMode === 'curl') {
-        nextMode = 'stretch';
+        nextMode = 'offset';
+      } else if (currentMode === 'offset') {
+        nextMode = 'match';
       } else {
         nextMode = 'fk';
       }
@@ -1411,11 +1614,11 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
     const pivot = joints[part]; 
     if (!pivot) return;
 
-    // If part is pinned OR global IK is active OR joint mode is 'stretch', use IK instead of rotation
+    // If part is pinned OR global IK is active OR kinetic mode is enabled, use IK instead of rotation
     const isLimbPart = [PartName.RWrist, PartName.LWrist, PartName.RAnkle, PartName.LAnkle].includes(part);
-    const isStretchMode = jointModes[part] === 'stretch';
+    const isKineticMode = jointModes[part] !== 'fk';
     
-    if (activePins.includes(part) || (kinematicMode !== 'fk' && isLimbPart) || (isStretchMode && isLimbPart)) {
+    if (activePins.includes(part) || (kinematicMode !== 'fk' && isLimbPart) || (isKineticMode && isLimbPart)) {
       setIsIKDragging(true);
       setEffectorPart(part);
     } else {
@@ -1438,12 +1641,7 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
   const cycleKinematicMode = useCallback(() => {
     setKinematicMode(prev => {
       let next: KinematicMode;
-      if (prev === 'fk') next = 'ik';
-      else if (prev === 'ik') next = 'fabrik';
-      else if (prev === 'fabrik') next = 'jacobian';
-      else if (prev === 'jacobian') next = 'pim2';
-      else if (prev === 'pim2') next = 'dls';
-      else if (prev === 'dls') next = 'fluid';
+      if (prev === 'fk') next = 'fabrik';
       else next = 'fk';
       addLog(`[SYSTEM]: KINEMATIC MODE -> ${next.toUpperCase()}`);
       return next;
@@ -1565,19 +1763,25 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
       });
       // Adjust panel position on resize if it would go off-screen
       setPanelRects(prev => {
-        const modelPanel = prev['model-settings-panel'];
-        const movementPanel = prev['movement-settings-panel'];
-        
-        const newModelX = Math.min(modelPanel.x, window.innerWidth - modelPanel.width - 16);
-        const newModelY = Math.min(modelPanel.y, window.innerHeight - (modelPanel.minimized ? 40 : modelPanel.height) - 16);
-        
-        const newMovementX = Math.min(movementPanel.x, window.innerWidth - movementPanel.width - 16);
-        const newMovementY = Math.min(movementPanel.y, window.innerHeight - (movementPanel.minimized ? 40 : movementPanel.height) - 16);
+        const clampPanel = (panel?: PanelRect) => {
+          if (!panel) return panel;
+          const panelHeight = panel.minimized ? 40 : panel.height;
+          const newX = Math.min(panel.x, window.innerWidth - panel.width - 16);
+          const newY = Math.min(panel.y, window.innerHeight - panelHeight - 16);
+          return { ...panel, x: newX, y: newY };
+        };
+
+        const modelPanel = clampPanel(prev['model-settings-panel']);
+        const movementPanel = clampPanel(prev['movement-settings-panel']);
+        const logPanel = clampPanel(prev['command-log-panel']);
+        const posePanel = clampPanel(prev['pose-data-terminal-panel']);
         
         return {
           ...prev,
-          'model-settings-panel': { ...modelPanel, x: newModelX, y: newModelY },
-          'movement-settings-panel': { ...movementPanel, x: newMovementX, y: newMovementY }
+          ...(modelPanel ? { 'model-settings-panel': modelPanel } : {}),
+          ...(movementPanel ? { 'movement-settings-panel': movementPanel } : {}),
+          ...(logPanel ? { 'command-log-panel': logPanel } : {}),
+          ...(posePanel ? { 'pose-data-terminal-panel': posePanel } : {}),
         };
       });
     };
@@ -1660,13 +1864,25 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
 
   const kinematicModeDescriptions: Record<KinematicMode, string> = {
     fk: 'FK: direct joint rotation, no target solving.',
-    ik: 'IK (CCD): iterative joint rotation toward target.',
     fabrik: 'FABRIK: forward/backward reaching with fixed bone lengths.',
-    jacobian: 'Jacobian: gradient-based solver for smoother convergence.',
-    pim2: 'PIM2: predictive IK with faster convergence.',
-    dls: 'DLS: damped least squares for stability near singularities.',
-    fluid: 'Fluid: soft, continuous IK with pinned constraints.',
   };
+
+  const blendModeOptions: Array<{ label: string; value: GlobalCompositeOperation }> = [
+    { label: 'Normal', value: 'source-over' },
+    { label: 'Multiply', value: 'multiply' },
+    { label: 'Screen', value: 'screen' },
+    { label: 'Overlay', value: 'overlay' },
+    { label: 'Soft Light', value: 'soft-light' },
+    { label: 'Darken', value: 'darken' },
+    { label: 'Lighten', value: 'lighten' },
+  ];
+  const fitModeOptions: Array<{ label: string; value: ImageFitMode }> = [
+    { label: 'Free', value: 'free' },
+    { label: 'Contain', value: 'contain' },
+    { label: 'Cover', value: 'cover' },
+  ];
+  const maskPhysicsOptions: MaskPhysicsMode[] = ['follow', 'replace', 'offset', 'balance', 'counter', 'lock'];
+  const maskBalanceOptions: MaskBalanceMode[] = ['x', 'y', 'slanted'];
 
   const renderModePresets: Record<RenderMode, { showPins: boolean; showBoneOverlay: boolean; maskControlsVisible: boolean }> = {
     default: { showPins: true, showBoneOverlay: true, maskControlsVisible: false },
@@ -1748,6 +1964,25 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
     }
   };
 
+  const rotateVector = (x: number, y: number, angleDeg: number) => {
+    const r = angleDeg * Math.PI / 180;
+    return { x: x * Math.cos(r) - y * Math.sin(r), y: x * Math.sin(r) + y * Math.cos(r) };
+  };
+
+  const getAverageRotation = useCallback((parts: PartName[], pose: Pose) => {
+    if (!parts.length) return 0;
+    let sumX = 0;
+    let sumY = 0;
+    parts.forEach(part => {
+      const poseKey = partNameToPoseKey[part];
+      const rot = getTotalRotation(poseKey, pose);
+      const rad = rot * Math.PI / 180;
+      sumX += Math.cos(rad);
+      sumY += Math.sin(rad);
+    });
+    return Math.atan2(sumY, sumX) * 180 / Math.PI;
+  }, []);
+
 
   const allPanelRectsArray = useMemo(() => Object.values(panelRects), [panelRects]);
   const settingsPanel = panelRects['model-settings-panel'];
@@ -1770,6 +2005,8 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
   const foregroundPlacement = resolvedForegroundLayer.src ? resolveLayerPlacement(resolvedForegroundLayer) : null;
   const bgOpacityPercent = Math.round(clampNumber(resolvedBackgroundLayer.opacity ?? 1, 0, 1) * 100);
   const fgOpacityPercent = Math.round(clampNumber(resolvedForegroundLayer.opacity ?? 1, 0, 1) * 100);
+  const bgFinalOpacity = clampNumber(resolvedBackgroundLayer.opacity ?? 1, 0, 1) * backgroundModeOpacity;
+  const fgFinalOpacity = clampNumber(resolvedForegroundLayer.opacity ?? 1, 0, 1);
   const bgScalePercent = clampNumber(resolvedBackgroundLayer.scale ?? 100, 10, 400);
   const fgScalePercent = clampNumber(resolvedForegroundLayer.scale ?? 100, 10, 400);
   const bgXPercent = clampNumber(resolvedBackgroundLayer.x ?? 50, 0, 100);
@@ -1779,21 +2016,107 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
   const activeMaskLayer = activeMaskEditorPart
     ? { ...DEFAULT_BODY_PART_MASK_LAYER, ...(bodyPartMaskLayers[activeMaskEditorPart] ?? {}) }
     : null;
+  const getImageFit = (mode?: ImageFitMode) => {
+    if (mode === 'cover') return 'cover';
+    if (mode === 'contain') return 'contain';
+    return 'fill';
+  };
+  const backgroundImageStyle: React.CSSProperties = {
+    position: 'absolute',
+    left: `${bgXPercent}%`,
+    top: `${bgYPercent}%`,
+    width: `${bgScalePercent}%`,
+    height: resolvedBackgroundLayer.fitMode === 'free' ? `${bgScalePercent}%` : 'auto',
+    transform: 'translate(-50%, -50%)',
+    objectFit: getImageFit(resolvedBackgroundLayer.fitMode),
+    opacity: bgFinalOpacity,
+    mixBlendMode: toBlendMode(resolvedBackgroundLayer.blendMode),
+    pointerEvents: 'none',
+  };
+  const foregroundImageStyle: React.CSSProperties = {
+    position: 'absolute',
+    left: `${fgXPercent}%`,
+    top: `${fgYPercent}%`,
+    width: `${fgScalePercent}%`,
+    height: resolvedForegroundLayer.fitMode === 'free' ? `${fgScalePercent}%` : 'auto',
+    transform: 'translate(-50%, -50%)',
+    objectFit: getImageFit(resolvedForegroundLayer.fitMode),
+    opacity: fgFinalOpacity,
+    mixBlendMode: toBlendMode(resolvedForegroundLayer.blendMode),
+    pointerEvents: 'none',
+  };
+
+  const maskLayersToRender = useMemo(() => {
+    return (Object.entries(bodyPartMaskLayers) as Array<[PartName, BodyPartMaskLayer]>)
+      .filter(([_, layer]) => layer?.src && layer.visible);
+  }, [bodyPartMaskLayers]);
+
+  const renderMaskLayer = useCallback((part: PartName, layer: BodyPartMaskLayer) => {
+    if (!layer.src) return null;
+    const basePos = jointPositions[part];
+    if (!basePos) return null;
+
+    const baseSize = getMaskBaseSize(part);
+    const scale = clampNumber(layer.scale ?? 100, 10, 400) / 100;
+    const lengthScale = layer.boneAdjustEnabled ? (layer.boneScaleLength ?? 1) : 1;
+    const widthScale = layer.boneAdjustEnabled ? (layer.boneScaleWidth ?? 1) : 1;
+    const width = baseSize * widthScale * scale;
+    const height = baseSize * lengthScale * scale;
+
+    const poseKey = partNameToPoseKey[part];
+    const baseRotation = getTotalRotation(poseKey, activePose);
+    const physicsMode = layer.physicsMode ?? 'follow';
+    const userRotation = layer.rotationDeg ?? 0;
+
+    const counterSource = layer.counterTargets?.length
+      ? getAverageRotation(layer.counterTargets, activePose)
+      : baseRotation;
+
+    let rotation = baseRotation + userRotation;
+    if (physicsMode === 'replace') rotation = userRotation;
+    if (physicsMode === 'counter') rotation = -counterSource + userRotation;
+    if (physicsMode === 'balance') {
+      const balance = layer.balanceMode === 'x' ? 0 : layer.balanceMode === 'y' ? 90 : 45;
+      rotation = balance + userRotation;
+    }
+
+    let anchor = basePos;
+    if (physicsMode === 'lock' && layer.lockTargets?.length) {
+      const locked = layer.lockTargets
+        .map(target => jointPositions[target])
+        .filter(Boolean) as Vector2D[];
+      if (locked.length) {
+        const sum = locked.reduce((acc, curr) => ({ x: acc.x + curr.x, y: acc.y + curr.y }), { x: 0, y: 0 });
+        anchor = { x: sum.x / locked.length, y: sum.y / locked.length };
+      }
+    }
+
+    const offsetX = layer.offsetX ?? 0;
+    const offsetY = layer.offsetY ?? 0;
+    const useLocalOffset = physicsMode !== 'replace' && physicsMode !== 'balance';
+    const offset = useLocalOffset ? rotateVector(offsetX, offsetY, baseRotation) : { x: offsetX, y: offsetY };
+    const pos = { x: anchor.x + offset.x, y: anchor.y + offset.y };
+
+    return (
+      <image
+        key={`mask-${part}`}
+        href={layer.src}
+        x={pos.x - width / 2}
+        y={pos.y - height / 2}
+        width={width}
+        height={height}
+        opacity={clampNumber(layer.opacity ?? 1, 0, 1)}
+        style={{ mixBlendMode: toBlendMode(layer.blendMode) }}
+        transform={`rotate(${rotation} ${pos.x} ${pos.y})`}
+        preserveAspectRatio="xMidYMid meet"
+        pointerEvents="none"
+      />
+    );
+  }, [activePose, jointPositions, getAverageRotation]);
 
   // Missing essential variables
   const [showGhost, setShowGhost] = useState(true);
   const [showOverlay, setShowOverlay] = useState(true);
-
-  // Computed values for part selection and interaction
-  const primarySelectedPart = useMemo(() => {
-    return (Object.entries(selectedParts).find(([p, sel]) => sel)?.[0]) as PartName | undefined;
-  }, [selectedParts]);
-
-  const selectedRotation = useMemo(() => {
-    if (!primarySelectedPart) return 0;
-    const key = partNameToPoseKey[primarySelectedPart];
-    return (activePose as any)[key] || 0;
-  }, [activePose, primarySelectedPart]);
 
   // Missing essential functions
   const handleMouseDownOnRoot = useCallback((e: React.MouseEvent<SVGCircleElement>) => {
@@ -1887,10 +2210,21 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
           </button>
         </div>
 
+        {/* Background Image Layer */}
+        {resolvedBackgroundLayer.src && resolvedBackgroundLayer.visible && (
+          <div className="absolute inset-0 z-[1] pointer-events-none">
+            <img
+              src={resolvedBackgroundLayer.src}
+              alt="Background Layer"
+              style={backgroundImageStyle}
+            />
+          </div>
+        )}
+
         {/* SVG Canvas */}
         <svg 
           ref={svgRef}
-          className="absolute inset-0 w-full h-full cursor-crosshair"
+          className="absolute inset-0 w-full h-full cursor-crosshair z-[5]"
           viewBox={autoViewBox}
           onMouseDown={handleMouseDownOnRoot}
         >
@@ -1911,7 +2245,20 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
             jointModes={jointModes}
             renderMode={renderMode}
           />
+
+          {maskLayersToRender.map(([part, layer]) => renderMaskLayer(part, layer))}
         </svg>
+
+        {/* Foreground Image Layer */}
+        {resolvedForegroundLayer.src && resolvedForegroundLayer.visible && (
+          <div className="absolute inset-0 z-[6] pointer-events-none">
+            <img
+              src={resolvedForegroundLayer.src}
+              alt="Foreground Layer"
+              style={foregroundImageStyle}
+            />
+          </div>
+        )}
 
         {/* MODEL SETTINGS PANEL */}
         <DraggablePanel
@@ -1956,6 +2303,421 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
               <div className="space-y-2 text-[8px] text-white/50">
                 <div>View: {viewMode.toUpperCase()}</div>
                 <div>Render: {getRenderModeDisplayName(renderMode)}</div>
+              </div>
+            </div>
+
+            {/* Image Layers */}
+            <div className="border-b border-white/20 pb-3">
+              <h3 className="text-[10px] font-bold text-white/70 uppercase tracking-widest mb-2">Image Layers</h3>
+              <div className="space-y-4 text-[8px] text-white/50">
+                {/* Background */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-white/70">Background</span>
+                    <div className="flex gap-1">
+                      <button onClick={openBackgroundUpload} className="px-2 py-1 border border-white/10 bg-white/5 hover:bg-white/10">Upload</button>
+                      <button onClick={handleClearBackgroundImageLayer} className="px-2 py-1 border border-white/10 bg-white/5 hover:bg-white/10">Clear</button>
+                    </div>
+                  </div>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={resolvedBackgroundLayer.visible}
+                      onChange={(e) => handlePatchBackgroundImageLayer({ visible: e.target.checked })}
+                    />
+                    Visible
+                  </label>
+                  <div className="space-y-1">
+                    <div>Opacity: {bgOpacityPercent}%</div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={bgOpacityPercent}
+                      onChange={(e) => handlePatchBackgroundImageLayer({ opacity: parseInt(e.target.value, 10) / 100 })}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <div>Scale: {bgScalePercent}%</div>
+                    <input
+                      type="range"
+                      min={10}
+                      max={400}
+                      step={1}
+                      value={bgScalePercent}
+                      onChange={(e) => handlePatchBackgroundImageLayer({ scale: parseInt(e.target.value, 10) })}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-1">
+                      <div>X: {bgXPercent}%</div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={bgXPercent}
+                        onChange={(e) => handlePatchBackgroundImageLayer({ x: parseInt(e.target.value, 10) })}
+                        className="w-full"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <div>Y: {bgYPercent}%</div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={bgYPercent}
+                        onChange={(e) => handlePatchBackgroundImageLayer({ y: parseInt(e.target.value, 10) })}
+                        className="w-full"
+                      />
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <select
+                      value={resolvedBackgroundLayer.fitMode ?? 'contain'}
+                      onChange={(e) => handlePatchBackgroundImageLayer({ fitMode: e.target.value as ImageFitMode })}
+                      className="w-full bg-black/30 border border-white/10 px-2 py-1"
+                    >
+                      {fitModeOptions.map(option => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={resolvedBackgroundLayer.blendMode ?? 'source-over'}
+                      onChange={(e) => handlePatchBackgroundImageLayer({ blendMode: e.target.value as GlobalCompositeOperation })}
+                      className="w-full bg-black/30 border border-white/10 px-2 py-1"
+                    >
+                      {blendModeOptions.map(option => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Foreground */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-white/70">Foreground</span>
+                    <div className="flex gap-1">
+                      <button onClick={openForegroundUpload} className="px-2 py-1 border border-white/10 bg-white/5 hover:bg-white/10">Upload</button>
+                      <button onClick={handleClearForegroundImageLayer} className="px-2 py-1 border border-white/10 bg-white/5 hover:bg-white/10">Clear</button>
+                    </div>
+                  </div>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={resolvedForegroundLayer.visible}
+                      onChange={(e) => handlePatchForegroundImageLayer({ visible: e.target.checked })}
+                    />
+                    Visible
+                  </label>
+                  <div className="space-y-1">
+                    <div>Opacity: {fgOpacityPercent}%</div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={fgOpacityPercent}
+                      onChange={(e) => handlePatchForegroundImageLayer({ opacity: parseInt(e.target.value, 10) / 100 })}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <div>Scale: {fgScalePercent}%</div>
+                    <input
+                      type="range"
+                      min={10}
+                      max={400}
+                      step={1}
+                      value={fgScalePercent}
+                      onChange={(e) => handlePatchForegroundImageLayer({ scale: parseInt(e.target.value, 10) })}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-1">
+                      <div>X: {fgXPercent}%</div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={fgXPercent}
+                        onChange={(e) => handlePatchForegroundImageLayer({ x: parseInt(e.target.value, 10) })}
+                        className="w-full"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <div>Y: {fgYPercent}%</div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={fgYPercent}
+                        onChange={(e) => handlePatchForegroundImageLayer({ y: parseInt(e.target.value, 10) })}
+                        className="w-full"
+                      />
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <select
+                      value={resolvedForegroundLayer.fitMode ?? 'contain'}
+                      onChange={(e) => handlePatchForegroundImageLayer({ fitMode: e.target.value as ImageFitMode })}
+                      className="w-full bg-black/30 border border-white/10 px-2 py-1"
+                    >
+                      {fitModeOptions.map(option => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={resolvedForegroundLayer.blendMode ?? 'source-over'}
+                      onChange={(e) => handlePatchForegroundImageLayer({ blendMode: e.target.value as GlobalCompositeOperation })}
+                      className="w-full bg-black/30 border border-white/10 px-2 py-1"
+                    >
+                      {blendModeOptions.map(option => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Mask Layers */}
+            <div className="border-b border-white/20 pb-3">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-[10px] font-bold text-white/70 uppercase tracking-widest">Mask Layers</h3>
+                <button
+                  onClick={() => setMaskControlsVisible(prev => !prev)}
+                  className="px-2 py-1 border border-white/10 bg-white/5 hover:bg-white/10 text-[8px]"
+                >
+                  {maskControlsVisible ? 'Hide' : 'Show'}
+                </button>
+              </div>
+              <div className="text-[8px] text-white/40 mb-2">Loaded: {loadedMaskCount}</div>
+              {!maskControlsVisible ? (
+                <div className="text-[8px] text-white/40">Mask controls are hidden.</div>
+              ) : (
+                <div className="space-y-3 text-[8px] text-white/50">
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={activeMaskEditorPart ?? ''}
+                        onChange={(e) => setActiveMaskEditorPart(e.target.value as PartName)}
+                        className="flex-1 bg-black/30 border border-white/10 px-2 py-1"
+                      >
+                        <option value="">Select Part</option>
+                        {orderedParts.map(part => (
+                          <option key={part} value={part}>{part}</option>
+                        ))}
+                      </select>
+                      <button
+                        onClick={() => setActiveMaskEditorPart(primarySelectedPart ?? null)}
+                        className="px-2 py-1 border border-white/10 bg-white/5 hover:bg-white/10"
+                      >
+                        Use Selected
+                      </button>
+                    </div>
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => openBodyPartMaskUpload()}
+                        className="px-2 py-1 border border-white/10 bg-white/5 hover:bg-white/10"
+                      >
+                        Upload Mask
+                      </button>
+                      <button
+                        onClick={() => handleClearBodyPartMaskLayer()}
+                        className="px-2 py-1 border border-white/10 bg-white/5 hover:bg-white/10"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+
+                  {activeMaskLayer ? (
+                    <div className="space-y-2">
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={activeMaskLayer.visible}
+                          onChange={(e) => handlePatchBodyPartMaskLayer({ visible: e.target.checked })}
+                        />
+                        Visible
+                      </label>
+
+                      <div className="space-y-1">
+                        <div>Opacity: {Math.round(clampNumber(activeMaskLayer.opacity ?? 1, 0, 1) * 100)}%</div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={Math.round(clampNumber(activeMaskLayer.opacity ?? 1, 0, 1) * 100)}
+                          onChange={(e) => handlePatchBodyPartMaskLayer({ opacity: parseInt(e.target.value, 10) / 100 })}
+                          className="w-full"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <div>Scale: {clampNumber(activeMaskLayer.scale ?? 100, 10, 400)}%</div>
+                        <input
+                          type="range"
+                          min={10}
+                          max={400}
+                          step={1}
+                          value={clampNumber(activeMaskLayer.scale ?? 100, 10, 400)}
+                          onChange={(e) => handlePatchBodyPartMaskLayer({ scale: parseInt(e.target.value, 10) })}
+                          className="w-full"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <div>Rotation: {Math.round(activeMaskLayer.rotationDeg ?? 0)}°</div>
+                        <input
+                          type="range"
+                          min={-180}
+                          max={180}
+                          step={1}
+                          value={Math.round(activeMaskLayer.rotationDeg ?? 0)}
+                          onChange={(e) => handlePatchBodyPartMaskLayer({ rotationDeg: parseInt(e.target.value, 10) })}
+                          className="w-full"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="space-y-1">
+                          <div>Offset X</div>
+                          <input
+                            type="range"
+                            min={-200}
+                            max={200}
+                            step={1}
+                            value={Math.round(activeMaskLayer.offsetX ?? 0)}
+                            onChange={(e) => handlePatchBodyPartMaskLayer({ offsetX: parseInt(e.target.value, 10) })}
+                            className="w-full"
+                          />
+                        </label>
+                        <label className="space-y-1">
+                          <div>Offset Y</div>
+                          <input
+                            type="range"
+                            min={-200}
+                            max={200}
+                            step={1}
+                            value={Math.round(activeMaskLayer.offsetY ?? 0)}
+                            onChange={(e) => handlePatchBodyPartMaskLayer({ offsetY: parseInt(e.target.value, 10) })}
+                            className="w-full"
+                          />
+                        </label>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <select
+                          value={activeMaskLayer.physicsMode ?? 'follow'}
+                          onChange={(e) => handlePatchBodyPartMaskLayer({ physicsMode: e.target.value as MaskPhysicsMode })}
+                          className="w-full bg-black/30 border border-white/10 px-2 py-1"
+                        >
+                          {maskPhysicsOptions.map(option => (
+                            <option key={option} value={option}>{option.toUpperCase()}</option>
+                          ))}
+                        </select>
+                        <select
+                          value={activeMaskLayer.balanceMode ?? 'x'}
+                          onChange={(e) => handlePatchBodyPartMaskLayer({ balanceMode: e.target.value as MaskBalanceMode })}
+                          className="w-full bg-black/30 border border-white/10 px-2 py-1"
+                          disabled={activeMaskLayer.physicsMode !== 'balance'}
+                        >
+                          {maskBalanceOptions.map(option => (
+                            <option key={option} value={option}>{option.toUpperCase()}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={!!activeMaskLayer.boneAdjustEnabled}
+                            onChange={(e) => handlePatchBodyPartMaskLayer({ boneAdjustEnabled: e.target.checked })}
+                          />
+                          Bone Adjust
+                        </label>
+                        <select
+                          value={activeMaskLayer.blendMode ?? 'source-over'}
+                          onChange={(e) => handlePatchBodyPartMaskLayer({ blendMode: e.target.value as GlobalCompositeOperation })}
+                          className="w-full bg-black/30 border border-white/10 px-2 py-1"
+                        >
+                          {blendModeOptions.map(option => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {activeMaskLayer.boneAdjustEnabled && (
+                        <div className="grid grid-cols-2 gap-2">
+                          <label className="space-y-1">
+                            <div>Length</div>
+                            <input
+                              type="range"
+                              min={0.4}
+                              max={2}
+                              step={0.05}
+                              value={activeMaskLayer.boneScaleLength ?? 1}
+                              onChange={(e) => handlePatchBodyPartMaskLayer({ boneScaleLength: parseFloat(e.target.value) })}
+                              className="w-full"
+                            />
+                          </label>
+                          <label className="space-y-1">
+                            <div>Width</div>
+                            <input
+                              type="range"
+                              min={0.4}
+                              max={2}
+                              step={0.05}
+                              value={activeMaskLayer.boneScaleWidth ?? 1}
+                              onChange={(e) => handlePatchBodyPartMaskLayer({ boneScaleWidth: parseFloat(e.target.value) })}
+                              className="w-full"
+                            />
+                          </label>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-[8px] text-white/40">Select a part to edit its mask.</div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* System Log */}
+            <div className="border-b border-white/20 pb-3">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-[10px] font-bold text-white/70 uppercase tracking-widest">System Log</h3>
+                <button
+                  onClick={() => setSystemLogs([])}
+                  className="px-2 py-1 border border-white/10 bg-white/5 hover:bg-white/10 text-[8px]"
+                >
+                  Clear
+                </button>
+              </div>
+              <div className="max-h-32 overflow-y-auto custom-scrollbar text-[8px] text-white/50 space-y-1">
+                {systemLogs.length === 0 ? (
+                  <div className="text-white/30">No logs yet.</div>
+                ) : (
+                  systemLogs.map((log, index) => (
+                    <div key={`${log.timestamp}-${index}`} className="flex gap-2">
+                      <span className="text-white/30">{log.timestamp}</span>
+                      <span>{log.message}</span>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           </div>
@@ -2033,6 +2795,29 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
             );
           })}
         </div>
+
+        {/* Hidden Upload Inputs */}
+        <input
+          ref={backgroundUploadInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handleBackgroundFileChange}
+        />
+        <input
+          ref={foregroundUploadInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handleForegroundFileChange}
+        />
+        <input
+          ref={bodyPartMaskUploadInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handleMaskFileChange}
+        />
       </div>
 
       {/* Pose Data Display - Bottom Right of Canvas */}

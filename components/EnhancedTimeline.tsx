@@ -15,7 +15,6 @@ interface EnhancedTimelineProps {
   onSlotDelete: (slotId: string) => void;
   onSlotReorder: (fromIndex: number, toIndex: number) => void;
   onTransitionUpdate: (slotId: string, duration: number, easing: EasingFunction) => void;
-  onSlotLabelUpdate: (slotId: string, label: string) => void;
   onPlay: () => void;
   onPause: () => void;
   onStop: () => void;
@@ -110,7 +109,7 @@ export const EnhancedTimeline: React.FC<EnhancedTimelineProps> = ({
     const slot = sequence.slots.find(s => s.id === slotId);
     if (slot) {
       setPoseString(poseToString(slot.pose));
-      setEditingSlot(slot);
+      setEditingSlot(slotId);
       setPoseEditMode(true);
     }
   };

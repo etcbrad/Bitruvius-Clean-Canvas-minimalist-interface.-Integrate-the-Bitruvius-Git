@@ -72,11 +72,11 @@ export const getPartCategoryDisplayName = (part: PartName): string => { // Expor
 // Utility function to create common PartWrapper props
 const createPartWrapperProps = (
   part: PartName,
-  onMouseDownOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void,
-  onDoubleClickOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void,
   selectedParts: { [key in PartName]: boolean },
   jointModes: Record<PartName, JointConstraint>,
   renderMode: RenderMode,
+  onMouseDownOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void,
+  onDoubleClickOnPart?: (part: PartName, event: React.MouseEvent<SVGGElement>) => void,
 ) => ({
   part,
   onMouseDownOnPart,
@@ -182,11 +182,11 @@ const renderBoneNode = (
     <PartWrapper 
       {...createPartWrapperProps(
         node.part,
-        onMouseDownOnPart,
-        onDoubleClickOnPart,
         selectedParts,
         jointModes,
-        renderMode
+        renderMode,
+        onMouseDownOnPart,
+        onDoubleClickOnPart
       )}
     >
       <Bone
