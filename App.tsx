@@ -722,8 +722,6 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
     }));
     addLog(`[LAYER]: CLEARED ${target.toUpperCase()}`);
   }, [activeMaskEditorPart, primarySelectedPart, addLog]);
-  }, [activeMaskEditorPart, primarySelectedPart, addLog]);[MASK]: CLEARED ${target.toUpperCase()}`);
-  }, [activeMaskEditorPart, primarySelectedPart, addLog]);
 
   const handlePatchBodyPartMaskLayer = useCallback((patch: Partial<BodyPartMaskLayer>, partOverride?: PartName) => {
     const target = partOverride ?? activeMaskEditorPart;
@@ -1987,6 +1985,8 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
   const allPanelRectsArray = useMemo(() => Object.values(panelRects), [panelRects]);
   const settingsPanel = panelRects['model-settings-panel'];
   const movementPanel = panelRects['movement-settings-panel'];
+  const logPanel = panelRects['command-log-panel'];
+  const posePanel = panelRects['pose-data-terminal-panel'];
 
   const panelQuickAccessButtons = useMemo(() => {
     const labels = ['M', 'MV'];
@@ -2155,61 +2155,101 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
     setActivePose(prev => ({ ...prev, [partKey]: newValue }));
   }, [primarySelectedPart]);
 
+  const topIconButton = "w-7 h-7 rounded-full border border-black/40 bg-[#8f8f8f] text-[9px] font-bold text-[#1b1b1b] hover:bg-[#9f9f9f] transition-colors";
+  const topToggleButton = (active: boolean) =>
+    `px-2 py-1 text-[9px] font-bold tracking-widest border border-black/40 rounded-sm transition-colors ${
+      active ? 'bg-[#2f2f2f] text-white' : 'bg-[#8f8f8f] text-[#1b1b1b] hover:bg-[#9f9f9f]'
+    }`;
+  const topPill = (active: boolean) =>
+    `px-2 py-1 rounded-full border border-black/40 text-[9px] font-bold tracking-widest ${
+      active ? 'bg-[#2f2f2f] text-white' : 'bg-[#5e3b3b] text-[#f6c2c2]'
+    }`;
+
   return (
-    <div className={`w-full h-full bg-mono-darker shadow-2xl flex flex-col relative touch-none fixed inset-0 z-50 overflow-hidden text-ink font-mono ${!isPoweredOn ? 'grayscale brightness-50' : ''} safe-area-inset`}>
-      <div className="relative flex h-full w-full">
-        
-        {/* Top Left: System Status */}
-        <div className="absolute top-4 left-4 z-[1000] flex flex-col gap-1">
-          <span className="text-[8px] text-white/40 uppercase">System_Status</span>
-          <div className="flex items-center gap-2 bg-black/40 px-2 py-1 border border-white/10 rounded">
-            <div className={`w-1.5 h-1.5 rounded-full ${isPoweredOn ? 'bg-accent-green animate-pulse' : 'bg-accent-red'}`} />
-            <span className="text-[9px] font-bold text-white/70 tracking-widest">
+    <div className={`w-full h-full bg-[#9a9a9a] flex flex-col relative touch-none fixed inset-0 z-50 overflow-hidden font-mono ${!isPoweredOn ? 'grayscale brightness-75' : ''} safe-area-inset`}>
+      <div className="h-11 flex items-center gap-3 px-3 bg-[#7f7f7f] border-b border-black/40 text-[9px] uppercase tracking-widest">
+        <div className="flex items-center gap-1">
+          <button className={topIconButton} onClick={handleUndo} aria-label="Undo">U</button>
+          <button className={topIconButton} onClick={handleRedo} aria-label="Redo">R</button>
+          <button
+            className={topIconButton}
+            onClick={() => {
+              setActivePose(RESET_POSE);
+              setGhostPose(RESET_POSE);
+              addLog('[POSE]: RESET');
+            }}
+            aria-label="Reset Pose"
+          >
+            RS
+          </button>
+        </div>
+
+        <div className="flex items-center gap-1 bg-[#8a8a8a] border border-black/40 rounded-sm px-1 py-1">
+          {panelQuickAccessButtons.map(({ label, panelId }) => (
+            <button
+              key={label}
+              onClick={() => openPanel(panelId)}
+              className={topToggleButton(!panelRects[panelId]?.minimized)}
+              aria-label={`Open ${label} panel`}
+            >
+              {label}
+            </button>
+          ))}
+          <button
+            onClick={() => setShowOverlay(prev => !prev)}
+            className={topToggleButton(showOverlay)}
+            aria-label="Toggle overlay"
+          >
+            S
+          </button>
+          <button
+            onClick={() => setShowCommandLog(prev => !prev)}
+            className={topToggleButton(showCommandLog)}
+            aria-label="Toggle log"
+          >
+            LOG
+          </button>
+          <button
+            onClick={() => setShowPoseData(prev => !prev)}
+            className={topToggleButton(showPoseData)}
+            aria-label="Toggle data"
+          >
+            DATA
+          </button>
+          <button
+            onClick={() => setPanelsVisible(prev => !prev)}
+            className={topToggleButton(!panelsVisible)}
+            aria-label="Toggle panels"
+          >
+            HIDE
+          </button>
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            className={topToggleButton(kinematicMode !== 'fk')}
+            onClick={cycleKinematicMode}
+            aria-label="Toggle kinematic mode"
+          >
+            {kinematicMode.toUpperCase()}
+          </button>
+          <div className={topPill(isPoweredOn)}>
+            <span className="inline-flex items-center gap-1">
+              <span className={`inline-block w-1.5 h-1.5 rounded-full ${isPoweredOn ? 'bg-green-300' : 'bg-red-300'}`} />
               {isPoweredOn ? 'ACTIVE' : 'STANDBY'}
             </span>
           </div>
-        </div>
-
-        {/* Top Right: Consolidated Controls */}
-        <div className="absolute top-4 right-4 z-[1000] flex items-center gap-2 bg-black/20 backdrop-blur-sm p-1 border border-white/10 rounded-full">
-          {/* Kinematic Mode Toggle */}
           <button
-            onClick={cycleKinematicMode}
-            className={`px-3 py-2 rounded-full border transition-all duration-300 flex items-center gap-2 ${kinematicMode !== 'fk' 
-              ? 'bg-accent-purple/30 border-accent-purple text-white shadow-[0_0_10px_rgba(168,85,247,0.3)]' 
-              : 'bg-white/10 border-white/20 text-white/70 hover:bg-white/20'
-            }`}
-            aria-label={`Kinematic Mode: ${kinematicMode.toUpperCase()}`}
-          >
-            <span className="text-[10px] font-bold tracking-tighter">{kinematicMode.toUpperCase()}</span>
-          </button>
-
-          {/* Power/Activation Button */}
-          <button
+            className={topToggleButton(isPoweredOn)}
             onClick={() => setIsPoweredOn(!isPoweredOn)}
-            className={`p-2 rounded-full border transition-all duration-300 ${isPoweredOn 
-              ? 'bg-accent-green/30 border-accent-green text-accent-green shadow-[0_0_15px_rgba(34,197,94,0.4)]' 
-              : 'bg-accent-red/30 border-accent-red text-accent-red opacity-50'
-            }`}
-            aria-label={isPoweredOn ? "System Shutdown" : "System Activation"}
+            aria-label={isPoweredOn ? 'Power down' : 'Power on'}
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
-          </button>
-
-          {/* Settings Toggle Button */}
-          <button
-            onClick={toggleSettingsPanelMinimized}
-            className={`p-2 bg-white/10 hover:bg-white/20 rounded-full border border-white/20 text-white hover:text-focus-ring transition-all duration-200 ${!settingsPanel.minimized ? 'border-selection text-selection bg-selection/20' : ''}`}
-            aria-label={settingsPanel.minimized ? "Open Model Settings" : "Close Model Settings"}
-          >
-            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-              <path d="M17.243 14.757l-.37-.37c-.63.63-1.39 1.05-2.22 1.25l-.23.95a.996.996 0 01-1.22.75l-2-.5a.996.996 0 01-.75-1.22l.23-.95c-.83-.2-1.59-.62-2.22-1.25l-.37.37a.997.997 0 01-1.41 0l-.707-.707a.997.997 0 010-1.414l.37-.37c-.63-.63-1.05-1.39-1.25-2.22l-.95-.23a.996.996 0 01-.75-1.22l.5-2a.996.996 0 011.22-.75l.95.23c.2-.83.62-1.59 1.25-2.22l-.37-.37a.997.997 0 010-1.414l.707-.707a.997.997 0 011.414 0l.37.37c.63-.63 1.39-1.05 2.22-1.25l.23-.95a.996.996 0 011.22-.75l2 .5a.996.996 0 01.75 1.22l-.23.95c.83.2 1.59.62 2.22 1.25l.37-.37a.997.997 0 011.414 0l.707.707a.997.997 0 010 1.414l-.37.37c.63.63 1.05 1.39 1.25 2.22l.95.23a.996.996 0 01.75 1.22l-.5 2a.996.996 0 01-1.22.75l-.95-.23c-.2.83-.62 1.59-1.25-2.22l.37.37a.997.997 0 010 1.414l-.707.707a.997.997 0 01-1.414 0zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" fillRule="evenodd"></path>
-            </svg>
+            PWR
           </button>
         </div>
+      </div>
 
+      <div className="relative flex-1 w-full overflow-hidden bg-[#e6e6e6] bg-triangle-grid">
         {/* Background Image Layer */}
         {resolvedBackgroundLayer.src && resolvedBackgroundLayer.visible && (
           <div className="absolute inset-0 z-[1] pointer-events-none">
@@ -2229,7 +2269,12 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
           onMouseDown={handleMouseDownOnRoot}
         >
           <Scanlines />
-          <SystemGuides />
+          <SystemGuides
+            floorY={FLOOR_HEIGHT}
+            groundMode={groundPlaneMode}
+            groundPattern={groundPattern}
+            perspective={groundPerspective}
+          />
           
           <Mannequin
             pose={activePose}
@@ -2260,7 +2305,50 @@ const dragStartInfo = useRef<{ startX: number; startY: number; startRootX: numbe
           </div>
         )}
 
-        {/* MODEL SETTINGS PANEL */}
+        {panelsVisible && (
+          <div className="absolute bottom-6 left-6 z-[40]">
+            <CanvasRotationWheel
+              selectedPartLabel={selectedPartLabel}
+              anchorLabel={getPinName(activePins)}
+              rotationModeLabel={primarySelectedPart ? getKineticModeShortLabel(jointModes[primarySelectedPart]) : 'STANDARD'}
+              kinematicModeLabel={kinematicMode.toUpperCase()}
+              kinematicModeDescription={kinematicModeDescriptions[kinematicMode]}
+              onRotateChild={(delta) => applyRotationDelta(primarySelectedPart ?? null, delta)}
+              onRotateParent={(delta) => applyRotationDelta(primarySelectedPart ? (PARENT_MAP[primarySelectedPart] ?? null) : null, delta)}
+              onSelectPrevPart={() => cycleSelectedPart(-1)}
+              onSelectNextPart={() => cycleSelectedPart(1)}
+              onCycleRotationMode={cycleSelectedJointMode}
+              onCycleKinematicMode={cycleKinematicMode}
+              onToggleSmartPinning={() => setSmartPinning(prev => !prev)}
+              onToggleMirror={() => setBodySyncMode(prev => !prev)}
+              onToggleOmni={() => setOmniSyncMode(prev => !prev)}
+              onToggleMasks={() => setMaskControlsVisible(prev => !prev)}
+              smartPinning={smartPinning}
+              mirrorMode={bodySyncMode}
+              omniMode={omniSyncMode}
+              masksVisible={maskControlsVisible}
+              currentRotation={currentPartRotation}
+              parentRotation={parentPartRotation}
+              pose={activePose}
+              selectedParts={selectedParts}
+              visibility={visibility}
+              activePins={activePins}
+              pinnedState={pinnedState}
+              jointModes={jointModes}
+              renderMode={renderMode}
+              modelStyle="default"
+              boneScale={boneScale}
+              boneVariantOverrides={boneVariantOverrides}
+              viewBox={autoViewBox}
+              collapsed={wheelCollapsed}
+              onToggleCollapsed={() => setWheelCollapsed(prev => !prev)}
+            />
+          </div>
+        )}
+
+        {panelsVisible && (
+          <>
+            {/* MODEL SETTINGS PANEL */}
         <DraggablePanel
           id="model-settings-panel"
           title="MODEL SETTINGS"
